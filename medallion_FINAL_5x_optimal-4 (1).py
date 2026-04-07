@@ -23,17 +23,17 @@ FAPI="https://fapi.binance.com";DAPI="https://api.binance.com"
 SYMBOL="ETHUSDT";CROSS_SYMBOLS=["BTCUSDT","SOLUSDT"]
 LEVERAGE=5;MARGIN_TYPE="ISOLATED";SCAN_INTERVAL=30
 DB_FILE="medallion.db";LOG_FILE="medallion.log"
-# Strategy A (trend-following, 5x)
-SA_STOP_ATR=1.0;SA_TP1_ATR=1.5;SA_TP1_FRAC=0.45;SA_TP2_ATR=2.5;SA_TP2_FRAC=0.30
-SA_TP3_ATR=4.5;SA_TP3_FRAC=0.25;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=68
+# Strategy A (trend-following, 5x) — TP levels pushed out for better R:R
+SA_STOP_ATR=1.0;SA_TP1_ATR=1.8;SA_TP1_FRAC=0.40;SA_TP2_ATR=3.0;SA_TP2_FRAC=0.30
+SA_TP3_ATR=5.5;SA_TP3_FRAC=0.30;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=68
 SA_STOP_MIN=0.008;SA_STOP_MAX=0.018
-# Strategy B (mean-reversion, 5x)
-SB_STOP_ATR=0.7;SB_TP1_ATR=0.6;SB_TP1_FRAC=0.55;SB_TP2_ATR=1.2;SB_TP2_FRAC=0.25
-SB_TP3_FRAC=0.20;SB_MIN_SCORE=58;SB_MAX_HOLD_H=6;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
+# Strategy B (mean-reversion, 5x) — faster TP1 lock + extended hold window
+SB_STOP_ATR=0.7;SB_TP1_ATR=0.6;SB_TP1_FRAC=0.50;SB_TP2_ATR=1.4;SB_TP2_FRAC=0.30
+SB_TP3_FRAC=0.20;SB_MIN_SCORE=58;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
 # Hurst
 H_TREND_STRONG=0.60;H_TREND=0.55;H_MR=0.45;H_MR_STRONG=0.35
 # Sizing
-KELLY_FRAC=0.20;KELLY_CAP=0.65;KELLY_DEFAULT=0.35;KELLY_MIN=0.15
+KELLY_FRAC=0.25;KELLY_CAP=0.70;KELLY_DEFAULT=0.38;KELLY_MIN=0.18
 VOL_TARGET=0.020;KILL_SWITCH_DD=0.10;DAILY_LOSS_LIMIT=-0.06;MAX_TRADES_DAY=4
 # VPIN
 VPIN_GATE=0.65;VPIN_WARN=0.55;VPIN_CLEAN=0.30
@@ -44,7 +44,7 @@ B_INIT_A=2;B_INIT_B=2;B_FORGET=0.995;B_TEMP=0.5;B_FLOOR=0.05
 # Signal freshness
 FRESH_LAMBDA=0.02
 # Compounding milestones
-MILESTONES=[(400,0.70,0.022),(500,0.75,0.023),(750,0.80,0.025)]
+MILESTONES=[(375,0.73,0.023),(475,0.77,0.025),(650,0.82,0.027),(1000,0.85,0.030)]
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler(LOG_FILE),logging.StreamHandler()])
@@ -1631,18 +1631,21 @@ class RiskAgent(BaseAgent):
         else:kelly=KELLY_DEFAULT
         # Step 2: Vol targeting
         vs=sigs.get("vol_scalar",1.0)
-        # Step 3: Confluence
+        # Step 3: Confluence — smooth gradient sizing
         sc=max(sigs.get("long_score",0),sigs.get("short_score",0))
-        if sc>=95:scs=1.20
-        elif sc>=88:scs=1.10
+        if sc>=95:scs=1.25
+        elif sc>=90:scs=1.18
+        elif sc>=85:scs=1.10
         elif sc>=78:scs=1.00
+        elif sc>=72:scs=0.90
         elif sc>=68:scs=0.80
         else:scs=0.70
-        # Step 4: Hurst
+        # Step 4: Hurst — reward strong trends more
         h=sigs.get("hurst",0.5)
-        if h>0.65:hs=1.15
+        if h>0.68:hs=1.22
+        elif h>0.60:hs=1.12
         elif h>0.55:hs=1.00
-        elif h>0.50:hs=0.60
+        elif h>0.50:hs=0.65
         else:hs=0.80
         # Step 5: Uncertainty
         uf=sigs.get("uncertainty_flags",0)
@@ -1663,8 +1666,8 @@ class RiskAgent(BaseAgent):
         if len(loss_pcts)>=5:
             cvar=np.percentile(loss_pcts,95)
             if cvar>0.10:cvs=0.50
-        # Step 9: Short penalty
-        shp=0.80 if direction=="SHORT"and sigs.get("vol_pct",50)>70 else 1.0
+        # Step 9: Short penalty — less aggressive; shorts profit in crashes
+        shp=0.88 if direction=="SHORT"and sigs.get("vol_pct",50)>80 else 1.0
         # Step 10: VPIN
         vp=sigs.get("vpin",0.4)
         if vp>VPIN_GATE:return 0
@@ -1687,7 +1690,7 @@ class RiskAgent(BaseAgent):
         # Step 14: Carry
         cf=sigs.get("carry_favorable",False);cag=sigs.get("carry_against",False)
         foic=sigs.get("funding_oi_conf",False)
-        cas=1.12 if foic else(1.05 if cf else(0.85 if cag else 1.0))
+        cas=1.15 if foic else(1.08 if cf else(0.85 if cag else 1.0))
         # Step 15: Agent disagreement
         if disagree_count>=3:return 0
         ads=[1.0,0.85,0.65][min(disagree_count,2)]
@@ -1701,8 +1704,9 @@ class RiskAgent(BaseAgent):
             kelly*=0.80
         # Step 17: Hot streak bonus (compound faster during winning streaks)
         consec_wins=self.db.kv_get("consec_wins",0)
-        if consec_wins>=3:hot_s=1.12  # 12% bigger after 3+ consecutive wins
-        elif consec_wins>=2:hot_s=1.06
+        if consec_wins>=5:hot_s=1.22  # Deep streak = strong regime
+        elif consec_wins>=3:hot_s=1.15
+        elif consec_wins>=2:hot_s=1.08
         else:hot_s=1.00
         # Combine
         sz=kelly*vs*scs*hs*us*ss*dds*cvs*shp*vps*dcs*bcs*oirs*cas*ads*exp_s*hot_s
@@ -1929,25 +1933,23 @@ class ExecutionAgent(BaseAgent):
         if p.direction=="SHORT"and price>=p.stop_price:self._close_all(price,"STOP_LOSS");return"STOPPED"
 
         # ═══ CHANGE 1: EARLY BREAKEVEN ═══
-        # Move stop to breakeven when 50% of TP1 distance is reached (not waiting for full TP1).
-        # This makes trades risk-free EARLIER. Risk-free trades can run indefinitely.
-        # Accuracy unchanged — same entries. But losing trades that briefly went positive
-        # now exit at breakeven instead of full stop loss.
+        # Move stop to breakeven at 40% of TP1 distance (earlier protection).
+        # Tighter buffer (0.03%) keeps more profit on reversal.
         if not p.tp1_hit:
             tp1_dist=abs(p.tp1_price-p.entry_price)
-            half_tp1=tp1_dist*0.50
-            if p.direction=="LONG"and price>=p.entry_price+half_tp1:
-                buf=p.entry_price*0.0005  # tighter buffer = keep more profit
+            early_be=tp1_dist*0.40
+            if p.direction=="LONG"and price>=p.entry_price+early_be:
+                buf=p.entry_price*0.0003  # tighter buffer = keep more profit
                 new_stop=p.entry_price+buf
                 if new_stop>p.stop_price:
                     p.stop_price=new_stop
-                    log.info(f"🛡️ EARLY BREAKEVEN @{price:.2f}|50% to TP1|Stop→${new_stop:.2f}")
-            elif p.direction=="SHORT"and price<=p.entry_price-half_tp1:
-                buf=p.entry_price*0.0005
+                    log.info(f"🛡️ EARLY BREAKEVEN @{price:.2f}|40% to TP1|Stop→${new_stop:.2f}")
+            elif p.direction=="SHORT"and price<=p.entry_price-early_be:
+                buf=p.entry_price*0.0003
                 new_stop=p.entry_price-buf
                 if new_stop<p.stop_price:
                     p.stop_price=new_stop
-                    log.info(f"🛡️ EARLY BREAKEVEN @{price:.2f}|50% to TP1|Stop→${new_stop:.2f}")
+                    log.info(f"🛡️ EARLY BREAKEVEN @{price:.2f}|40% to TP1|Stop→${new_stop:.2f}")
 
         # ═══ CHANGE 2: MOMENTUM-ADAPTIVE TP1 FRACTION ═══
         # In STRONG trends (H>0.60), only take 30% off at TP1 instead of 45%.
@@ -1958,11 +1960,14 @@ class ExecutionAgent(BaseAgent):
             if hit:
                 h_now=self.db.kv_get("hurst_history",[0.5])
                 h_now=h_now[-1]if h_now else 0.5
-                if p.strategy=="A"and h_now>0.60:
-                    frac=0.30  # Strong trend: only take 30% off (let 70% run)
+                if p.strategy=="A"and h_now>0.65:
+                    frac=0.25  # Very strong trend: only take 25% off (let 75% run)
+                    log.info(f"🔥 VERY STRONG TREND TP1: Taking only 25% (H={h_now:.2f})")
+                elif p.strategy=="A"and h_now>0.58:
+                    frac=0.30  # Strong trend: only take 30% off
                     log.info(f"🔥 STRONG TREND TP1: Taking only 30% (H={h_now:.2f})")
                 elif p.strategy=="A":
-                    frac=SA_TP1_FRAC  # Normal: take 45% off
+                    frac=SA_TP1_FRAC  # Normal: take 40% off
                 else:
                     frac=SB_TP1_FRAC  # Mean reversion: take 55% off (lock MR profit fast)
                 cq=self._round_qty(p.qty_full*frac)
@@ -1993,14 +1998,16 @@ class ExecutionAgent(BaseAgent):
             base_trail=SA_TRAIL_ATR if p.strategy=="A"else 0.6
             current_hurst=self.db.kv_get("hurst_history",[0.5])
             h_now=current_hurst[-1]if current_hurst else 0.5
-            # Three tiers of trailing based on trend strength + confirmed profit
-            if h_now>0.65 and p.mfe>0.05:
-                trail_mult=base_trail*1.50  # Tier 3: VERY wide — massive trend + deep in profit
-                log.info(f"🚀 MAX TRAIL: H={h_now:.2f} MFE={p.mfe:.1%} → trail×1.50")if p.mfe==unr else None
-            elif h_now>0.60 and p.mfe>0.03:
+            # Four tiers of trailing based on trend strength + confirmed profit
+            if h_now>0.65 and p.mfe>0.06:
+                trail_mult=base_trail*1.80  # Tier 4: MAX — deep in profit, let it ride
+                log.info(f"🚀 MAX TRAIL: H={h_now:.2f} MFE={p.mfe:.1%} → trail×1.80")if p.mfe==unr else None
+            elif h_now>0.62 and p.mfe>0.04:
+                trail_mult=base_trail*1.50  # Tier 3: Very wide
+            elif h_now>0.58 and p.mfe>0.02:
                 trail_mult=base_trail*1.30  # Tier 2: Wide — strong trend + confirmed profit
-            elif h_now>0.56:
-                trail_mult=base_trail*1.15  # Tier 1: Slightly wider
+            elif h_now>0.54:
+                trail_mult=base_trail*1.12  # Tier 1: Slightly wider
             else:
                 trail_mult=base_trail  # Default
             td=atr_val*trail_mult
@@ -2020,7 +2027,7 @@ class ExecutionAgent(BaseAgent):
         if p.tp1_hit and p.qty_rem>0 and p.tp3_price>0:
             h_now=self.db.kv_get("hurst_history",[0.5])
             h_now=h_now[-1]if h_now else 0.5
-            if h_now>0.62 and p.strategy=="A":
+            if h_now>0.58 and p.strategy=="A":
                 pass  # Strong trend: let trailing stop handle exit, no TP3 cap
             else:
                 hit=(p.direction=="LONG"and price>=p.tp3_price)or(p.direction=="SHORT"and price<=p.tp3_price)
@@ -2034,14 +2041,23 @@ class ExecutionAgent(BaseAgent):
             atr_val=self.db.kv_get("current_atr",50)
             if p.direction=="LONG":
                 profit_lock_level=p.tp1_price  # minimum lock = TP1 level
-                if price>p.tp2_price+atr_val and p.stop_price<profit_lock_level:
+                if price>p.tp2_price+atr_val*0.7 and p.stop_price<profit_lock_level:
                     p.stop_price=profit_lock_level
                     log.info(f"🔒 PROFIT LOCK: Stop ratcheted to TP1 level ${profit_lock_level:.2f}")
+                # Second lock: if price passes TP2 + 1.5 ATR, lock stop at midpoint of TP1-TP2
+                mid_lock=(p.tp1_price+p.tp2_price)/2
+                if price>p.tp2_price+atr_val*1.5 and p.stop_price<mid_lock:
+                    p.stop_price=mid_lock
+                    log.info(f"🔒 PROFIT LOCK LV2: Stop→midpoint ${mid_lock:.2f}")
             else:
                 profit_lock_level=p.tp1_price
-                if price<p.tp2_price-atr_val and p.stop_price>profit_lock_level:
+                if price<p.tp2_price-atr_val*0.7 and p.stop_price>profit_lock_level:
                     p.stop_price=profit_lock_level
                     log.info(f"🔒 PROFIT LOCK: Stop ratcheted to TP1 level ${profit_lock_level:.2f}")
+                mid_lock=(p.tp1_price+p.tp2_price)/2
+                if price<p.tp2_price-atr_val*1.5 and p.stop_price>mid_lock:
+                    p.stop_price=mid_lock
+                    log.info(f"🔒 PROFIT LOCK LV2: Stop→midpoint ${mid_lock:.2f}")
 
         # Strategy B max hold (adaptive — extend when carry is favorable)
         if p.strategy=="B"and p.opened_at:
@@ -2198,7 +2214,7 @@ class ArbiterAgent(BaseAgent):
         # Phase C: Confidence
         tw=sum(self.weights.get(v.agent_name,0.1)for v in verdicts)
         ac=sum(v.confidence*self.weights.get(v.agent_name,0.1)for v in verdicts)/max(tw,0.01)
-        if ac<0.45:return"SKIP",ac,f"Low confidence:{ac:.2f}",""
+        if ac<0.42:return"SKIP",ac,f"Low confidence:{ac:.2f}",""
         # Phase D: Disagreement
         dis=sum(1 for v in verdicts if v.direction not in(cons,"AGREE","NEUTRAL","SKIP")and v.direction!="")
         if dis>=3:return"SKIP",ac,f"Too much disagreement:{dis}",""
@@ -2581,12 +2597,15 @@ class MedallionBot:
                 # Confidence adjustment
                 if conf<0.60:sz*=0.70
                 elif conf>0.78:sz*=1.08
-                # Tweak: Conviction premium — when 5+ agents agree with high confidence
+                # Tweak: Conviction premium — when 4+ agents agree with high confidence
                 agreeing=sum(1 for v in verdicts if v.direction==direction)
                 avg_agree_conf=np.mean([v.confidence for v in verdicts if v.direction==direction])if agreeing>0 else 0
                 if agreeing>=5 and avg_agree_conf>0.65:
-                    sz*=1.15  # 15% conviction premium
-                    log.info(f"🎯 CONVICTION PREMIUM: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +15%")
+                    sz*=1.20  # 20% conviction premium — near-unanimous
+                    log.info(f"🎯 MAX CONVICTION: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +20%")
+                elif agreeing>=4 and avg_agree_conf>0.60:
+                    sz*=1.12  # 12% conviction premium — strong consensus
+                    log.info(f"🎯 CONVICTION PREMIUM: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +12%")
                 price=md["price"];atr_val=sigs.get("atr_val",price*0.015)
                 qty=self.exec_ag._round_qty(sz*LEVERAGE/price)
                 min_qty=self.exec_ag.sym_info.get("min_qty",0.001)
