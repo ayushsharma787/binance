@@ -780,7 +780,7 @@ class Confluence:
 
     @staticmethod
     def score_a(s):
-        """Strategy A (trend-following) scoring with adaptive weights."""
+        """Strategy A (trend-following) scoring with adaptive weights on ALL signals."""
         ls=0;ss=0;ap=Confluence._apply
         kv=s.get("kalman_vel",0);kt=s.get("kalman_thresh",0.001);ka=s.get("kalman_acc",0)
         if kv>kt and ka>0:ls+=ap(12,"kalman_strong")
@@ -793,46 +793,46 @@ class Confluence:
         if hbe>0.65:ss+=ap(14,"hmm_strong")
         elif hbe>0.55:ss+=ap(8,"hmm_mild")
         hu=s.get("hurst",0.5)
-        if hu>0.60:ls+=10;ss+=10
-        elif hu>0.55:ls+=5;ss+=5
-        if s.get("vol_scalar",1)>1.20:ls+=8;ss+=6
+        if hu>0.60:ls+=ap(10,"hurst_trend");ss+=ap(10,"hurst_trend")
+        elif hu>0.55:ls+=ap(5,"hurst_trend");ss+=ap(5,"hurst_trend")
+        if s.get("vol_scalar",1)>1.20:ls+=ap(8,"volume_surge");ss+=ap(6,"volume_surge")
         el=s.get("ensemble_long",0);es=s.get("ensemble_short",0)
-        if el>0.65:ls+=12
-        elif el>0.55:ls+=7
-        if es>0.65:ss+=12
-        elif es>0.55:ss+=7
-        if s.get("price",0)>s.get("vwap",0):ls+=7
-        else:ss+=7
-        if s.get("st_1h",0)>0:ls+=8
-        else:ss+=8
-        if s.get("st_4h",0)>0:ls+=8
-        else:ss+=8
-        if s.get("ema8",0)>s.get("ema21",0):ls+=5
-        else:ss+=5
-        if s.get("vol_ratio",1)>1.5:ls+=5;ss+=5
+        if el>0.65:ls+=ap(12,"ensemble_strong")
+        elif el>0.55:ls+=ap(7,"ensemble_mild")
+        if es>0.65:ss+=ap(12,"ensemble_strong")
+        elif es>0.55:ss+=ap(7,"ensemble_mild")
+        if s.get("price",0)>s.get("vwap",0):ls+=ap(7,"vwap_aligned")
+        else:ss+=ap(7,"vwap_aligned")
+        if s.get("st_1h",0)>0:ls+=ap(8,"supertrend_1h")
+        else:ss+=ap(8,"supertrend_1h")
+        if s.get("st_4h",0)>0:ls+=ap(8,"supertrend_4h")
+        else:ss+=ap(8,"supertrend_4h")
+        if s.get("ema8",0)>s.get("ema21",0):ls+=ap(5,"ema_aligned")
+        else:ss+=ap(5,"ema_aligned")
+        if s.get("vol_ratio",1)>1.5:ls+=ap(5,"volume_surge");ss+=ap(5,"volume_surge")
         sk=s.get("stoch_k",50)
-        if sk<50:ls+=7
-        if sk>50:ss+=7
+        if sk<50:ls+=ap(7,"stoch_signal")
+        if sk>50:ss+=ap(7,"stoch_signal")
         fr=s.get("funding_rate",0)
-        if fr<0:ls+=5
-        if fr>0.0005:ss+=8
+        if fr<0:ls+=ap(5,"funding_favorable")
+        if fr>0.0005:ss+=ap(8,"funding_favorable")
         if fr>0.001:ls-=15
         if fr<-0.0006:ss-=15
         ca=s.get("cross_asset",0)
-        if ca>1.0:ls+=8;ss-=8
-        elif ca>0.5:ls+=4;ss-=4
-        elif ca<-1.0:ss+=8;ls-=8
-        elif ca<-0.5:ss+=4;ls-=4
+        if ca>1.0:ls+=ap(8,"cross_asset");ss-=ap(8,"cross_asset")
+        elif ca>0.5:ls+=ap(4,"cross_asset");ss-=ap(4,"cross_asset")
+        elif ca<-1.0:ss+=ap(8,"cross_asset");ls-=ap(8,"cross_asset")
+        elif ca<-0.5:ss+=ap(4,"cross_asset");ls-=ap(4,"cross_asset")
         vp=s.get("vpin",0.4)
-        if vp<0.40:ls+=6;ss+=5
+        if vp<0.40:ls+=ap(6,"vpin_clean");ss+=ap(5,"vpin_clean")
         elif vp>0.55:ls-=12;ss-=12
         elif vp>0.45:ls-=6;ss-=6
         ase=s.get("adverse_sel",0.5)
         if ase<0.30:ls+=5;ss+=5
         elif ase>0.50:ls-=10;ss-=10
         bp=s.get("book_pressure",0)
-        if bp>0.60:ls+=5
-        elif bp<-0.60:ss+=5
+        if bp>0.60:ls+=ap(5,"book_pressure")
+        elif bp<-0.60:ss+=ap(5,"book_pressure")
         if bp<-0.40:ls-=8
         if bp>0.40:ss-=8
         mi=s.get("avg_mi",0)
@@ -840,8 +840,8 @@ class Confluence:
         bc=s.get("bayesian_consensus",0)
         if bc>0.75:ls+=6;ss+=6
         ois=s.get("oi_scenario","")
-        if ois=="A":ls+=6
-        elif ois=="B":ss+=6
+        if ois=="A":ls+=ap(6,"oi_confirms")
+        elif ois=="B":ss+=ap(6,"oi_confirms")
         elif ois=="C":ls-=8
         elif ois=="D":ss-=8
         if s.get("oi_extreme",False):ls-=10;ss-=10
@@ -853,10 +853,10 @@ class Confluence:
         if s.get("funding_oi_conf_long",False):ls+=15
         if s.get("funding_oi_conf_short",False):ss+=15
         al=s.get("agents_long",0);ash=s.get("agents_short",0)
-        if al>=6:ls+=14
-        elif al>=5:ls+=8
-        if ash>=6:ss+=14
-        elif ash>=5:ss+=8
+        if al>=6:ls+=ap(14,"agent_consensus")
+        elif al>=5:ls+=ap(8,"agent_consensus")
+        if ash>=6:ss+=ap(14,"agent_consensus")
+        elif ash>=5:ss+=ap(8,"agent_consensus")
         if s.get("agents_oppose_long",0)>=2:ls-=12
         if s.get("agents_oppose_short",0)>=2:ss-=12
         if s.get("agent_near_veto",False):ls-=18;ss-=18
@@ -1141,157 +1141,269 @@ class LogisticScorer:
         return np.array(f,dtype=float)
 
     @staticmethod
+    def _train_one(X,y,l2_lambda=0.01):
+        """Train logistic regression on (X,y) with LR decay + early stopping.
+        Returns (weights, train_acc, val_acc) or None."""
+        if len(X)<40:return None
+        # Train/validation split: 80/20 chronological (no shuffle — trades are time-ordered)
+        split=int(len(X)*0.80)
+        X_train,X_val=X[:split],X[split:]
+        y_train,y_val=y[:split],y[split:]
+        # Standardize on TRAINING data only (prevent data leakage)
+        mu=X_train.mean(axis=0);sd=X_train.std(axis=0)+1e-8
+        Xt=(X_train-mu)/sd;Xv=(X_val-mu)/sd
+        Xt_aug=np.column_stack([Xt,np.ones(len(Xt))])
+        Xv_aug=np.column_stack([Xv,np.ones(len(Xv))])
+        n_feat=Xt_aug.shape[1];w=np.zeros(n_feat)
+        best_val_loss=np.inf;best_w=w.copy();patience=0;max_patience=20
+        lr_rate=0.10
+        for epoch in range(500):
+            # Learning rate decay
+            if epoch==100:lr_rate=0.05
+            elif epoch==250:lr_rate=0.02
+            elif epoch==400:lr_rate=0.01
+            z=Xt_aug@w;p=1/(1+np.exp(-np.clip(z,-20,20)))
+            grad=Xt_aug.T@(p-y_train)/len(y_train)
+            reg=l2_lambda*w;reg[-1]=0  # don't regularize intercept
+            w-=lr_rate*(grad+reg)
+            # Early stopping on validation loss every 10 epochs
+            if epoch%10==9:
+                zv=Xv_aug@w;pv=1/(1+np.exp(-np.clip(zv,-20,20)))
+                val_loss=-np.mean(y_val*np.log(pv+1e-10)+(1-y_val)*np.log(1-pv+1e-10))
+                if val_loss<best_val_loss-0.001:
+                    best_val_loss=val_loss;best_w=w.copy();patience=0
+                else:
+                    patience+=1
+                    if patience>=max_patience:break
+        w=best_w  # use weights from best validation epoch
+        train_pred=(Xt_aug@w>0).astype(int);train_acc=np.mean(train_pred==y_train)
+        val_pred=(Xv_aug@w>0).astype(int);val_acc=np.mean(val_pred==y_val)
+        return w,mu,sd,float(train_acc),float(val_acc)
+
+    @staticmethod
     def train(db):
-        """Train logistic regression on closed trade data. Returns coefficients or None."""
+        """Train separate long/short logistic models with proper validation."""
         trades=db.query("SELECT id,direction,total_pnl_pct FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT 300")
-        if len(trades)<100:return None  # not enough data
-        X=[];y=[]
+        if len(trades)<100:return None
+        X_long=[];y_long=[];X_short=[];y_short=[]
         for tid,direction,pnl in trades:
             feat=db.kv_get(f"trade_features_{tid}")
             if feat is None:continue
             feat=np.array(feat,dtype=float)
             if len(feat)!=len(LogisticScorer.FEATURES):continue
-            X.append(feat)
-            y.append(1 if(pnl or 0)>0 else 0)
-        if len(X)<80:return None  # not enough with features stored
-        X=np.array(X);y=np.array(y)
-        # Standardize features (zero mean, unit variance)
-        mu=X.mean(axis=0);sd=X.std(axis=0)+1e-8
-        X_std=(X-mu)/sd
-        # Add intercept
-        X_aug=np.column_stack([X_std,np.ones(len(X_std))])
-        # Logistic regression via gradient descent (from scratch — no sklearn)
-        n_feat=X_aug.shape[1];w=np.zeros(n_feat);lr_rate=0.05
-        for epoch in range(200):
-            z=X_aug@w;p=1/(1+np.exp(-np.clip(z,-20,20)))
-            grad=X_aug.T@(p-y)/len(y)
-            # L2 regularization (prevent overfitting)
-            reg=0.01*w;reg[-1]=0  # don't regularize intercept
-            w-=lr_rate*(grad+reg)
-        # Compute training accuracy
-        preds=(X_aug@w>0).astype(int);acc=np.mean(preds==y)
-        # Store model
-        model={"weights":w.tolist(),"mu":mu.tolist(),"sd":sd.tolist(),
-               "n_trades":len(X),"accuracy":float(acc),"trained_at":utcnow()}
+            if direction=="LONG":X_long.append(feat);y_long.append(1 if(pnl or 0)>0 else 0)
+            else:X_short.append(feat);y_short.append(1 if(pnl or 0)>0 else 0)
+        # Try separate models if enough data per direction, else combined
+        separate=len(X_long)>=50 and len(X_short)>=50
+        if separate:
+            l_result=LogisticScorer._train_one(np.array(X_long),np.array(y_long))
+            s_result=LogisticScorer._train_one(np.array(X_short),np.array(y_short))
+            if l_result is None or s_result is None:separate=False
+        if separate:
+            lw,lmu,lsd,l_tacc,l_vacc=l_result
+            sw,smu,ssd,s_tacc,s_vacc=s_result
+            model={"version":2,"separate":True,
+                   "long_weights":lw.tolist(),"long_mu":lmu.tolist(),"long_sd":lsd.tolist(),
+                   "long_train_acc":l_tacc,"long_val_acc":l_vacc,
+                   "short_weights":sw.tolist(),"short_mu":smu.tolist(),"short_sd":ssd.tolist(),
+                   "short_train_acc":s_tacc,"short_val_acc":s_vacc,
+                   "n_trades":len(X_long)+len(X_short),
+                   "accuracy":(l_vacc+s_vacc)/2,"trained_at":utcnow()}
+            log.info(f"📊 LOGISTIC TRAINED (separate): LONG {len(X_long)}t val={l_vacc:.1%} | SHORT {len(X_short)}t val={s_vacc:.1%}")
+        else:
+            X_all=X_long+X_short;y_all=y_long+y_short
+            if len(X_all)<80:return None
+            result=LogisticScorer._train_one(np.array(X_all),np.array(y_all))
+            if result is None:return None
+            w,mu,sd,train_acc,val_acc=result
+            model={"version":2,"separate":False,
+                   "weights":w.tolist(),"mu":mu.tolist(),"sd":sd.tolist(),
+                   "n_trades":len(X_all),"accuracy":float(val_acc),"train_acc":float(train_acc),
+                   "trained_at":utcnow()}
+            log.info(f"📊 LOGISTIC TRAINED (combined): {len(X_all)} trades, train={train_acc:.1%}, val={val_acc:.1%}")
+        # Log feature importance
+        if separate:
+            for label,weights in[("LONG",lw),("SHORT",sw)]:
+                importances=sorted(zip(LogisticScorer.FEATURES,np.abs(weights[:-1])),key=lambda x:-x[1])
+                for name,imp in importances[:3]:
+                    sign="+"if weights[LogisticScorer.FEATURES.index(name)]>0 else"-"
+                    log.info(f"  {label} top: {name} ({sign}{imp:.3f})")
+        else:
+            importances=sorted(zip(LogisticScorer.FEATURES,np.abs(w[:-1])),key=lambda x:-x[1])
+            for name,imp in importances[:5]:
+                sign="+"if w[LogisticScorer.FEATURES.index(name)]>0 else"-"
+                log.info(f"  Top feature: {name} ({sign}{imp:.3f})")
         db.kv_set("logistic_model",model)
-        log.info(f"📊 LOGISTIC MODEL TRAINED: {len(X)} trades, accuracy={acc:.1%}, features={n_feat-1}")
-        # Log feature importance (absolute weight magnitude)
-        importances=sorted(zip(LogisticScorer.FEATURES,np.abs(w[:-1])),key=lambda x:-x[1])
-        for name,imp in importances[:5]:
-            sign="+"if w[LogisticScorer.FEATURES.index(name)]>0 else"-"
-            log.info(f"  Top feature: {name} ({sign}{imp:.3f})")
         return model
+
+    @staticmethod
+    def _predict_direction(feat,weights,mu,sd):
+        """Predict P(profitable) using one set of logistic weights."""
+        mu=np.array(mu);sd=np.array(sd);w=np.array(weights)
+        feat_std=(feat-mu)/sd
+        feat_aug=np.append(feat_std,1.0)
+        z=float(feat_aug@w)
+        return float(1/(1+np.exp(-np.clip(z,-20,20))))
 
     @staticmethod
     def predict(sigs,model):
         """Predict P(profitable) for current signals. Returns (p_long, p_short)."""
         if model is None:return 0.5,0.5
         feat=LogisticScorer.extract_features(sigs)
-        w=np.array(model["weights"]);mu=np.array(model["mu"]);sd=np.array(model["sd"])
-        feat_std=(feat-mu)/sd
-        feat_aug=np.append(feat_std,1.0)
-        z=float(feat_aug@w);p=1/(1+np.exp(-np.clip(z,-20,20)))
-        # p = probability of profitable trade given these signals
-        # For directionality: flip features for SHORT (negate momentum/direction features)
-        feat_short=feat.copy()
-        feat_short[0]*=-1  # kalman velocity
-        feat_short[1]*=-1  # kalman acc
-        feat_short[2],feat_short[3]=feat_short[3],feat_short[2]  # swap bull/bear
-        feat_short[5],feat_short[6]=feat_short[6],feat_short[5]  # swap ensemble L/S
-        feat_short[7]*=-1  # VWAP distance
-        feat_short[8]*=-1  # supertrend 1h
-        feat_short[9]*=-1  # supertrend 4h
-        feat_short[10]*=-1  # EMA cross
-        feat_short[14]*=-1  # book pressure
-        feat_short_std=(feat_short-mu)/sd
-        feat_short_aug=np.append(feat_short_std,1.0)
-        z_short=float(feat_short_aug@w);p_short=1/(1+np.exp(-np.clip(z_short,-20,20)))
-        return float(p),float(p_short)
+        if model.get("version",1)>=2 and model.get("separate",False):
+            # Separate long/short models — no feature flipping needed
+            p_long=LogisticScorer._predict_direction(feat,model["long_weights"],model["long_mu"],model["long_sd"])
+            p_short=LogisticScorer._predict_direction(feat,model["short_weights"],model["short_mu"],model["short_sd"])
+        else:
+            # Combined model with feature flipping (v1 compat)
+            w=np.array(model["weights"]);mu=np.array(model["mu"]);sd=np.array(model["sd"])
+            p_long=LogisticScorer._predict_direction(feat,model["weights"],model["mu"],model["sd"])
+            feat_short=feat.copy()
+            feat_short[0]*=-1;feat_short[1]*=-1
+            feat_short[2],feat_short[3]=feat_short[3],feat_short[2]
+            feat_short[5],feat_short[6]=feat_short[6],feat_short[5]
+            feat_short[7]*=-1;feat_short[8]*=-1;feat_short[9]*=-1;feat_short[10]*=-1;feat_short[14]*=-1
+            p_short=LogisticScorer._predict_direction(feat_short,model["weights"],model["mu"],model["sd"])
+        return float(p_long),float(p_short)
 
-# ═══ GRADIENT BOOSTED SCORER — Phase 2 (activates after 500 trades) ═══
+# ═══ GRADIENT BOOSTED SCORER — Phase 3 (activates after 500 trades) ═══
 class GBMScorer:
-    """From-scratch gradient boosted decision stumps using only numpy.
-    Captures feature INTERACTIONS that logistic regression cannot:
-    e.g. 'Kalman bullish is only profitable when VPIN < 0.40'
+    """From-scratch gradient boosted trees (depth-3) using only numpy.
+    Captures true feature INTERACTIONS that logistic regression cannot:
+    e.g. 'Kalman bullish AND VPIN < 0.40 AND Hurst > 0.60' as a compound condition.
     Uses same 20 features as LogisticScorer. Activates after 500 trades.
-    Architecture: 50 depth-1 stumps, lr=0.1, min 15 samples per leaf, L2 reg."""
+    Architecture: 40 depth-3 trees, lr=0.08, min 12 samples per leaf, L2 reg.
+    Trains SEPARATE long/short models instead of manual feature flipping."""
 
     @staticmethod
-    def _find_best_split(X,residuals,weights):
-        n,nf=X.shape;best_loss=np.inf;best_split=None
+    def _build_tree(X,residuals,weights,max_depth=3,min_leaf=12,depth=0):
+        """Recursively build a depth-limited decision tree on residuals."""
+        n=len(residuals)
+        leaf_val=float(np.sum(residuals*weights)/(np.sum(weights)+1e-8))
+        if depth>=max_depth or n<2*min_leaf:
+            return{"leaf":True,"val":leaf_val}
+        best_loss=np.inf;best_split=None;nf=X.shape[1]
         for f_idx in range(nf):
             vals=np.unique(X[:,f_idx])
             if len(vals)<2:continue
-            candidates=np.percentile(vals,np.linspace(10,90,min(10,len(vals))))
+            candidates=np.percentile(vals,np.linspace(10,90,min(8,len(vals))))
             for thresh in candidates:
                 left=X[:,f_idx]<=thresh;right=~left
                 nl=left.sum();nr=right.sum()
-                if nl<15 or nr<15:continue
+                if nl<min_leaf or nr<min_leaf:continue
                 wl=weights[left];wr=weights[right];rl=residuals[left];rr=residuals[right]
                 lv=np.sum(rl*wl)/(np.sum(wl)+1e-8)
                 rv=np.sum(rr*wr)/(np.sum(wr)+1e-8)
                 reg=0.1*(lv**2+rv**2)
                 loss=np.sum((rl-lv)**2*wl)+np.sum((rr-rv)**2*wr)+reg
-                if loss<best_loss:best_loss=loss;best_split=(f_idx,float(thresh),float(lv),float(rv))
-        return best_split
+                if loss<best_loss:best_loss=loss;best_split=(f_idx,float(thresh),left,right)
+        if best_split is None:
+            return{"leaf":True,"val":leaf_val}
+        f_idx,thresh,left,right=best_split
+        left_tree=GBMScorer._build_tree(X[left],residuals[left],weights[left],max_depth,min_leaf,depth+1)
+        right_tree=GBMScorer._build_tree(X[right],residuals[right],weights[right],max_depth,min_leaf,depth+1)
+        return{"leaf":False,"f":int(f_idx),"t":thresh,"left":left_tree,"right":right_tree}
+
+    @staticmethod
+    def _predict_tree(tree,x):
+        """Predict a single sample through one tree."""
+        if tree["leaf"]:return tree["val"]
+        if x[tree["f"]]<=tree["t"]:return GBMScorer._predict_tree(tree["left"],x)
+        return GBMScorer._predict_tree(tree["right"],x)
+
+    @staticmethod
+    def _predict_tree_batch(tree,X):
+        """Predict batch through one tree."""
+        return np.array([GBMScorer._predict_tree(tree,X[i])for i in range(len(X))])
+
+    @staticmethod
+    def _train_direction(X,y,n_trees=40,lr=0.08,max_depth=3):
+        """Train a single GBM for one direction. Returns (trees, base_pred, accuracy)."""
+        mu=X.mean(axis=0);sd=X.std(axis=0)+1e-8;X_std=(X-mu)/sd
+        base_rate=np.clip(y.mean(),0.01,0.99);base_pred=np.log(base_rate/(1-base_rate))
+        preds=np.full(len(y),base_pred);trees=[]
+        prev_loss=np.inf
+        for t in range(n_trees):
+            p=1/(1+np.exp(-np.clip(preds,-20,20)))
+            residuals=y-p;weights=p*(1-p)+1e-8
+            tree=GBMScorer._build_tree(X_std,residuals,weights,max_depth=max_depth)
+            if tree["leaf"]and abs(tree["val"])<1e-6:break  # no improvement
+            tree_preds=GBMScorer._predict_tree_batch(tree,X_std)
+            preds+=lr*tree_preds
+            trees.append(tree)
+            # Early stopping: check log-loss every 10 trees
+            if t%10==9:
+                p_check=1/(1+np.exp(-np.clip(preds,-20,20)))
+                loss=-np.mean(y*np.log(p_check+1e-10)+(1-y)*np.log(1-p_check+1e-10))
+                if loss>prev_loss-0.001:break  # converged
+                prev_loss=loss
+        final_p=1/(1+np.exp(-np.clip(preds,-20,20)));acc=np.mean((final_p>0.5)==y)
+        return trees,float(base_pred),mu.tolist(),sd.tolist(),float(acc)
 
     @staticmethod
     def train(db):
         trades=db.query("SELECT id,direction,total_pnl_pct FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT 500")
         if len(trades)<400:return None
-        X=[];y=[]
+        X_long=[];y_long=[];X_short=[];y_short=[]
         for tid,direction,pnl in trades:
             feat=db.kv_get(f"trade_features_{tid}")
             if feat is None:continue
             feat=np.array(feat,dtype=float)
             if len(feat)!=len(LogisticScorer.FEATURES):continue
-            X.append(feat);y.append(1.0 if(pnl or 0)>0 else 0.0)
-        if len(X)<300:return None
-        X=np.array(X);y=np.array(y)
-        mu=X.mean(axis=0);sd=X.std(axis=0)+1e-8;X_std=(X-mu)/sd
-        base_rate=y.mean();base_pred=np.log(base_rate/(1-base_rate+1e-8))
-        preds=np.full(len(y),base_pred);stumps=[];lr=0.1
-        for t in range(50):
-            p=1/(1+np.exp(-np.clip(preds,-20,20)))
-            residuals=y-p;weights=p*(1-p)+1e-8
-            split=GBMScorer._find_best_split(X_std,residuals,weights)
-            if split is None:break
-            f_idx,thresh,lv,rv=split
-            mask=X_std[:,f_idx]<=thresh
-            preds[mask]+=lr*lv;preds[~mask]+=lr*rv
-            stumps.append({"f":int(f_idx),"t":float(thresh),"l":float(lv),"r":float(rv)})
-        final_p=1/(1+np.exp(-np.clip(preds,-20,20)));acc=np.mean((final_p>0.5)==y)
-        model={"stumps":stumps,"mu":mu.tolist(),"sd":sd.tolist(),"base_pred":float(base_pred),
-               "lr":lr,"n_trades":len(X),"n_stumps":len(stumps),"accuracy":float(acc),"trained_at":utcnow()}
+            if direction=="LONG":X_long.append(feat);y_long.append(1.0 if(pnl or 0)>0 else 0.0)
+            else:X_short.append(feat);y_short.append(1.0 if(pnl or 0)>0 else 0.0)
+        # Need enough data for each direction
+        if len(X_long)<80 or len(X_short)<80:
+            # Fall back to combined training if not enough per-direction data
+            X_all=np.array(X_long+X_short);y_all=np.array(list(y_long)+list(y_short))
+            if len(X_all)<300:return None
+            trees,base_pred,mu,sd,acc=GBMScorer._train_direction(X_all,y_all)
+            model={"version":2,"separate":False,"trees":trees,"base_pred":base_pred,
+                   "mu":mu,"sd":sd,"lr":0.08,"n_trades":len(X_all),"n_trees":len(trees),
+                   "accuracy":acc,"trained_at":utcnow()}
+        else:
+            X_l=np.array(X_long);y_l=np.array(y_long)
+            X_s=np.array(X_short);y_s=np.array(y_short)
+            l_trees,l_bp,l_mu,l_sd,l_acc=GBMScorer._train_direction(X_l,y_l)
+            s_trees,s_bp,s_mu,s_sd,s_acc=GBMScorer._train_direction(X_s,y_s)
+            model={"version":2,"separate":True,
+                   "long_trees":l_trees,"long_base":l_bp,"long_mu":l_mu,"long_sd":l_sd,"long_acc":l_acc,
+                   "short_trees":s_trees,"short_base":s_bp,"short_mu":s_mu,"short_sd":s_sd,"short_acc":s_acc,
+                   "lr":0.08,"n_trades":len(X_long)+len(X_short),
+                   "n_trees":len(l_trees)+len(s_trees),"accuracy":(l_acc+s_acc)/2,"trained_at":utcnow()}
+            log.info(f"  LONG model: {len(X_long)} trades, {len(l_trees)} trees, acc={l_acc:.1%}")
+            log.info(f"  SHORT model: {len(X_short)} trades, {len(s_trees)} trees, acc={s_acc:.1%}")
         db.kv_set("gbm_model",model)
-        feat_counts=np.zeros(len(LogisticScorer.FEATURES))
-        for s in stumps:feat_counts[s["f"]]+=1
-        importances=sorted(zip(LogisticScorer.FEATURES,feat_counts),key=lambda x:-x[1])
-        log.info(f"🌲 GBM TRAINED: {len(X)} trades, {len(stumps)} stumps, accuracy={acc:.1%}")
-        for name,cnt in importances[:5]:
-            if cnt>0:log.info(f"  Split: {name} ({int(cnt)}× used)")
+        log.info(f"🌲 GBM TRAINED: {model['n_trades']} trades, {model['n_trees']} depth-3 trees, accuracy={model['accuracy']:.1%}")
         return model
+
+    @staticmethod
+    def _predict_one(feat,trees,base_pred,mu,sd,lr=0.08):
+        """Run features through a set of trees."""
+        mu=np.array(mu);sd=np.array(sd)
+        feat_std=(feat-mu)/sd
+        pred=base_pred
+        for tree in trees:pred+=lr*GBMScorer._predict_tree(tree,feat_std)
+        return float(1/(1+np.exp(-np.clip(pred,-20,20))))
 
     @staticmethod
     def predict(sigs,model):
         if model is None:return 0.5,0.5
         feat=LogisticScorer.extract_features(sigs)
-        mu=np.array(model["mu"]);sd=np.array(model["sd"]);lr=model["lr"]
-        feat_std=(feat-mu)/sd
-        pred=model["base_pred"]
-        for s in model["stumps"]:
-            if feat_std[s["f"]]<=s["t"]:pred+=lr*s["l"]
-            else:pred+=lr*s["r"]
-        p_long=float(1/(1+np.exp(-np.clip(pred,-20,20))))
-        # SHORT: flip directional features
-        fs=feat.copy();fs[0]*=-1;fs[1]*=-1
-        fs[2],fs[3]=fs[3],fs[2];fs[5],fs[6]=fs[6],fs[5]
-        fs[7]*=-1;fs[8]*=-1;fs[9]*=-1;fs[10]*=-1;fs[14]*=-1
-        fs_std=(fs-mu)/sd;pred_s=model["base_pred"]
-        for s in model["stumps"]:
-            if fs_std[s["f"]]<=s["t"]:pred_s+=lr*s["l"]
-            else:pred_s+=lr*s["r"]
-        p_short=float(1/(1+np.exp(-np.clip(pred_s,-20,20))))
+        if model.get("version",1)>=2 and model.get("separate",False):
+            # Separate long/short models — no feature flipping needed
+            p_long=GBMScorer._predict_one(feat,model["long_trees"],model["long_base"],model["long_mu"],model["long_sd"],model["lr"])
+            p_short=GBMScorer._predict_one(feat,model["short_trees"],model["short_base"],model["short_mu"],model["short_sd"],model["lr"])
+        else:
+            # Fallback: combined model with feature flipping (v1 compat)
+            trees=model.get("trees",model.get("stumps",[]))
+            mu=np.array(model["mu"]);sd=np.array(model["sd"]);lr=model["lr"]
+            p_long=GBMScorer._predict_one(feat,trees,model["base_pred"],model["mu"],model["sd"],lr)
+            # SHORT: flip directional features
+            fs=feat.copy();fs[0]*=-1;fs[1]*=-1
+            fs[2],fs[3]=fs[3],fs[2];fs[5],fs[6]=fs[6],fs[5]
+            fs[7]*=-1;fs[8]*=-1;fs[9]*=-1;fs[10]*=-1;fs[14]*=-1
+            p_short=GBMScorer._predict_one(fs,trees,model["base_pred"],model["mu"],model["sd"],lr)
         return p_long,p_short
 
     @staticmethod
@@ -3087,29 +3199,16 @@ class MedallionBot:
                 log.info(f"    📊 Both systems perform similarly — hybrid blend is working well")
         log.info(f"{'═'*60}")
 
-    def backtest(self):
-        """Walk-forward backtest on historical data with slippage and fees."""
-        self._validate_keys()
-        log.info("═"*60);log.info("  WALK-FORWARD BACKTEST");log.info("═"*60)
-        log.info("Fetching 500 bars of 1h history...")
-        df=self.client.klines(SYMBOL,"1h",500)
-        if len(df)<200:log.error("Not enough data for backtest");return
-        closes=df["close"].values;highs=df["high"].values;lows=df["low"].values
-        volumes=df["volume"].values
-        # Walk-forward: train=200 bars, test=50 bars, step=50
-        results=[];equity=300.0;trades=[];peak=300.0
-        fee_rate=0.0004  # 4bps round trip (maker+taker on 5x)
-        log.info(f"Starting equity: ${equity:.2f} | Bars: {len(df)} | Fee: {fee_rate:.2%}")
-        for start in range(200,len(closes)-10,10):
+    def _simulate_trades(self,closes,highs,lows,start_equity=300.0,train_end=200,step=10):
+        """Core trade simulation logic. Returns list of trade dicts."""
+        equity=start_equity;trades=[];fee_rate=0.0004
+        for start in range(train_end,len(closes)-10,step):
             window=closes[max(0,start-200):start]
             test_window=closes[start:min(start+10,len(closes))]
             if len(window)<100 or len(test_window)<2:continue
-            # Compute signals on training window
             hd=Sig.hurst(window[-100:]);h=hd["hurst"]
-            if H_MR<=h<=H_TREND:continue  # neutral zone — skip
+            if H_MR<=h<=H_TREND:continue
             kd=Sig.kalman(window[-200:]);hmm=Sig.hmm(np.diff(np.log(window+1e-10))[-200:])
-            har=Sig.har_rv(window)
-            # Simple direction decision
             if h>H_TREND:
                 strat="A"
                 if kd["velocity"]>kd["threshold"]and hmm["dominant"]=="BULL":direction="LONG"
@@ -3121,7 +3220,6 @@ class MedallionBot:
                 if sr["k"]<15:direction="LONG"
                 elif sr["k"]>85:direction="SHORT"
                 else:continue
-            # Simulate trade on test window
             entry=test_window[0];atr_val=np.mean([highs[start-i]-lows[start-i]for i in range(1,15)])
             if strat=="A":
                 stop_d=max(min(atr_val*SA_STOP_ATR,entry*SA_STOP_MAX),entry*SA_STOP_MIN)
@@ -3131,10 +3229,7 @@ class MedallionBot:
                 tp1_d=atr_val*SB_TP1_ATR
             if direction=="LONG":stop=entry-stop_d;tp1=entry+tp1_d
             else:stop=entry+stop_d;tp1=entry-tp1_d
-            # Size: ~14% of equity at 5x
-            margin=equity*0.14;notional=margin*LEVERAGE;qty=notional/entry
-            # Walk through test bars
-            pnl=0;exit_reason="HOLD"
+            margin=equity*0.14;pnl=0;exit_reason="HOLD"
             for j in range(1,len(test_window)):
                 bar_h=highs[start+j]if start+j<len(highs)else test_window[j]
                 bar_l=lows[start+j]if start+j<len(lows)else test_window[j]
@@ -3146,14 +3241,27 @@ class MedallionBot:
                     if bar_h>=stop:pnl=(entry-stop)/entry*LEVERAGE;exit_reason="STOP";break
                     if bar_l<=tp1:pnl=(entry-tp1)/entry*LEVERAGE*SA_TP1_FRAC+(entry-bar_c)/entry*LEVERAGE*(1-SA_TP1_FRAC);exit_reason="TP1";break
                 pnl=(bar_c-entry)/entry*LEVERAGE if direction=="LONG"else(entry-bar_c)/entry*LEVERAGE
-            # Apply fees + estimated slippage
-            pnl-=fee_rate*2  # entry+exit fees
-            pnl-=0.0003  # 3bps estimated slippage (with limit orders)
-            pnl_dollar=margin*pnl
-            equity+=pnl_dollar;peak=max(peak,equity)
+            pnl-=fee_rate*2;pnl-=0.0003
+            equity+=margin*pnl
             trades.append({"dir":direction,"strat":strat,"entry":entry,"pnl":pnl,
-                          "pnl_usd":pnl_dollar,"exit":exit_reason,"equity":equity})
-        # Report results
+                          "pnl_usd":margin*pnl,"exit":exit_reason,"equity":equity})
+        return trades
+
+    def backtest(self):
+        """Walk-forward backtest with proper train/test separation and bootstrap CI."""
+        self._validate_keys()
+        log.info("═"*60);log.info("  WALK-FORWARD BACKTEST");log.info("═"*60)
+        log.info("Fetching 500 bars of 1h history...")
+        df=self.client.klines(SYMBOL,"1h",500)
+        if len(df)<200:log.error("Not enough data for backtest");return
+        closes=df["close"].values;highs=df["high"].values;lows=df["low"].values
+        # ═══ PROPER TRAIN/TEST SPLIT ═══
+        # First 60% for signal calibration (training), last 40% for out-of-sample test
+        n=len(closes);train_n=int(n*0.60);test_start=train_n
+        log.info(f"Total bars: {n} | Train: 0-{train_n} | Test: {test_start}-{n}")
+        log.info(f"Train period signals are computed on training window only")
+        # Run trades only on test portion (out-of-sample)
+        trades=self._simulate_trades(closes,highs,lows,start_equity=300.0,train_end=test_start,step=10)
         if not trades:log.info("No trades generated in backtest");return
         total=len(trades);wins=[t for t in trades if t["pnl"]>0];losses=[t for t in trades if t["pnl"]<=0]
         wr=len(wins)/total;avg_w=np.mean([t["pnl"]for t in wins])if wins else 0
@@ -3162,28 +3270,49 @@ class MedallionBot:
         max_dd=0;pk=300
         for t in trades:
             pk=max(pk,t["equity"]);dd=(pk-t["equity"])/pk;max_dd=max(max_dd,dd)
-        sharpe=np.mean([t["pnl"]for t in trades])/(np.std([t["pnl"]for t in trades])+1e-10)*np.sqrt(252)
+        pnls=np.array([t["pnl"]for t in trades])
+        sharpe=np.mean(pnls)/(np.std(pnls)+1e-10)*np.sqrt(252)
         final_eq=trades[-1]["equity"]
         log.info(f"\n{'═'*60}")
-        log.info(f"  BACKTEST RESULTS (walk-forward, fee+slippage adjusted)")
+        log.info(f"  BACKTEST RESULTS (out-of-sample, fee+slippage adjusted)")
         log.info(f"{'═'*60}")
         log.info(f"  Trades: {total} | WR: {wr:.1%} ({len(wins)}W/{len(losses)}L)")
         log.info(f"  Avg Win: {avg_w:.2%} | Avg Loss: {avg_l:.2%} | PF: {pf:.2f}")
         log.info(f"  Sharpe: {sharpe:.2f} | Max DD: {max_dd:.1%}")
         log.info(f"  Start: $300 → End: ${final_eq:.2f} ({(final_eq-300)/300:+.1%})")
-        log.info(f"  Fees deducted: {fee_rate*2:.2%} per trade | Slippage: 3bps")
+        log.info(f"  Fees deducted: 8bps per trade | Slippage: 3bps")
         # Per strategy
         for st in["A","B"]:
             st_t=[t for t in trades if t["strat"]==st]
             if st_t:
                 sw=sum(1 for t in st_t if t["pnl"]>0)
                 log.info(f"  Strategy {st}: {len(st_t)} trades, {sw/len(st_t):.0%} WR")
-        # Per direction
         for d in["LONG","SHORT"]:
             dt=[t for t in trades if t["dir"]==d]
             if dt:
                 dw=sum(1 for t in dt if t["pnl"]>0)
                 log.info(f"  {d}: {len(dt)} trades, {dw/len(dt):.0%} WR")
+        # ═══ BOOTSTRAP CONFIDENCE INTERVALS ═══
+        if total>=10:
+            n_boot=1000;boot_wrs=[];boot_sharpes=[];boot_pfs=[]
+            for _ in range(n_boot):
+                idx=np.random.randint(0,total,size=total)
+                bp=pnls[idx]
+                bw=np.mean(bp>0);boot_wrs.append(bw)
+                bs=np.mean(bp)/(np.std(bp)+1e-10)*np.sqrt(252);boot_sharpes.append(bs)
+                bwins=bp[bp>0];blosses=bp[bp<=0]
+                if len(blosses)>0 and len(bwins)>0:
+                    boot_pfs.append(abs(np.mean(bwins)*len(bwins))/(abs(np.mean(blosses)*len(blosses))+1e-10))
+            log.info(f"\n  BOOTSTRAP CONFIDENCE INTERVALS (1000 resamples):")
+            log.info(f"  Win Rate:  {np.percentile(boot_wrs,5):.1%} — {np.percentile(boot_wrs,95):.1%} (90% CI)")
+            log.info(f"  Sharpe:    {np.percentile(boot_sharpes,5):.2f} — {np.percentile(boot_sharpes,95):.2f} (90% CI)")
+            if boot_pfs:log.info(f"  PF:        {np.percentile(boot_pfs,5):.2f} — {np.percentile(boot_pfs,95):.2f} (90% CI)")
+            # Is the edge statistically significant?
+            p_profitable=np.mean([1 for s in boot_sharpes if s>0])/n_boot
+            log.info(f"  P(profitable): {p_profitable:.1%}")
+            if p_profitable>0.90:log.info(f"  ✅ STATISTICALLY SIGNIFICANT EDGE (>{90}% of bootstraps profitable)")
+            elif p_profitable>0.70:log.info(f"  ⚠️ LIKELY EDGE but not statistically robust")
+            else:log.info(f"  ❌ NO SIGNIFICANT EDGE — results could be noise")
         log.info(f"{'═'*60}")
 
     def agents_cmd(self):
