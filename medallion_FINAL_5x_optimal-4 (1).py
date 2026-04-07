@@ -33,7 +33,7 @@ SB_TP3_FRAC=0.20;SB_MIN_SCORE=58;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0
 # Hurst
 H_TREND_STRONG=0.60;H_TREND=0.55;H_MR=0.45;H_MR_STRONG=0.35
 # Sizing
-KELLY_FRAC=0.25;KELLY_CAP=0.70;KELLY_DEFAULT=0.38;KELLY_MIN=0.18
+KELLY_FRAC=0.25;KELLY_CAP=0.70;KELLY_CAP_SHORT=0.55;KELLY_DEFAULT=0.38;KELLY_MIN=0.18
 VOL_TARGET=0.020;KILL_SWITCH_DD=0.10;DAILY_LOSS_LIMIT=-0.06;MAX_TRADES_DAY=4
 # VPIN
 VPIN_GATE=0.65;VPIN_WARN=0.55;VPIN_CLEAN=0.30
@@ -290,6 +290,36 @@ class BinanceClient:
             df["ot"]=pd.to_datetime(df["ot"],unit="ms")
             return df
         return pd.DataFrame()
+    def klines_paginated(self,sym,interval,total=3000,per_page=1500):
+        """Fetch up to `total` klines by paginating with endTime. Returns concatenated DataFrame."""
+        cols=["ot","open","high","low","close","volume","ct","qv","trades","tbv","tbqv","ig"]
+        frames=[];end_time=None
+        remaining=total
+        while remaining>0:
+            limit=min(per_page,remaining)
+            params={"symbol":sym,"interval":interval,"limit":limit}
+            if end_time:params["endTime"]=end_time
+            r=self._req("GET",f"{FAPI}/fapi/v1/klines",params)
+            if not r or len(r)==0:break
+            df=pd.DataFrame(r,columns=cols)
+            for c in["open","high","low","close","volume","qv","tbv"]:df[c]=df[c].astype(float)
+            df["ot"]=pd.to_datetime(df["ot"],unit="ms")
+            frames.append(df)
+            remaining-=len(df)
+            if len(df)<limit:break  # no more data
+            end_time=int(r[0][0])-1  # step back before earliest bar
+        if not frames:return pd.DataFrame()
+        out=pd.concat(frames[::-1]).drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
+        return out
+    def leverage_brackets(self,sym):
+        """Return maintenance margin rate for sym at current leverage from /leverageBracket."""
+        r=self._req("GET",f"{FAPI}/fapi/v1/leverageBracket",{"symbol":sym},signed=True)
+        if r and isinstance(r,list) and len(r)>0:
+            brackets=r[0].get("brackets",[])
+            for b in brackets:
+                if b.get("initialLeverage",999)>=LEVERAGE:
+                    return float(b.get("maintMarginRatio",0.005))
+        return 0.005  # safe default for ETH at 5x
     def price(self,sym):
         r=self._req("GET",f"{FAPI}/fapi/v1/ticker/price",{"symbol":sym})
         return float(r["price"])if r and"price"in r else 0.0
@@ -330,6 +360,8 @@ class BinanceClient:
     def ticker_24h(self,sym):return self._req("GET",f"{FAPI}/fapi/v1/ticker/24hr",{"symbol":sym})
 # ═══ SIGNAL ENGINE — ALL 15 LAYERS ═══
 class Sig:
+    _hmm_params=None  # (A, mu, sig) — warm-start cache for online updates
+
     @staticmethod
     def kalman(prices,Q=1e-5,R=1e-3):
         """Layer 1: 2-state Kalman [price,velocity]"""
@@ -350,14 +382,26 @@ class Sig:
                "signal":float(np.clip(s,-1,1)),"threshold":th,"velocities":vels,"innovations":innov}
 
     @staticmethod
-    def hmm(returns,n_states=3,n_iter=25):
-        """Layer 2: 3-state HMM with Baum-Welch"""
+    def hmm(returns,n_states=3,n_iter=None):
+        """Layer 2: 3-state HMM with online-style warm-start updates.
+        Cold start: 15 Baum-Welch iterations. Warm start: 5 iterations using
+        cached parameters + exponential forgetting on transition matrix.
+        Responds to regime changes in 3-5 bars instead of 20-50."""
         n=len(returns)
         if n<30:return{"p_bull":0.33,"p_neutral":0.34,"p_bear":0.33,"dominant":"NEUTRAL","uncertain":True}
-        pi=np.array([0.33,0.34,0.33]);A=np.array([[0.8,0.15,0.05],[0.1,0.8,0.1],[0.05,0.15,0.8]])
-        mu=np.array([np.percentile(returns,75),np.median(returns),np.percentile(returns,25)])
-        sig=np.maximum(np.array([np.std(returns)]*3),1e-8)
-        for _ in range(n_iter):
+        cached=Sig._hmm_params
+        FORGET=0.97  # exponential forgetting factor for transition matrix
+        if cached is not None:
+            A=cached[0].copy();mu=cached[1].copy();sig=cached[2].copy()
+            pi=np.array([0.33,0.34,0.33]);max_iter=5 if n_iter is None else n_iter
+        else:
+            pi=np.array([0.33,0.34,0.33])
+            A=np.array([[0.8,0.15,0.05],[0.1,0.8,0.1],[0.05,0.15,0.8]])
+            mu=np.array([np.percentile(returns,75),np.median(returns),np.percentile(returns,25)])
+            sig=np.maximum(np.array([np.std(returns)]*3),1e-8)
+            max_iter=15 if n_iter is None else n_iter
+        prev_mu=mu.copy()
+        for it in range(max_iter):
             B=np.zeros((n_states,n))
             for j in range(n_states):B[j]=sp_stats.norm.pdf(returns,mu[j],sig[j])+1e-300
             alpha=np.zeros((n,n_states));alpha[0]=pi*B[:,0];alpha[0]/=alpha[0].sum()+1e-300
@@ -374,9 +418,14 @@ class Sig:
                 for i in range(n_states):
                     for j in range(n_states):xi[i,j]+=alpha[t,i]*A[i,j]*B[j,t+1]*beta[t+1,j]
             xi/=xi.sum()+1e-300
+            # Exponential forgetting: blend new evidence with prior transition matrix
             for i in range(n_states):
                 rs=xi[i].sum()
-                if rs>0:A[i]=xi[i]/rs
+                if rs>0:A[i]=FORGET*A[i]+(1-FORGET)*(xi[i]/rs)
+            # Early stopping: convergence check (skip on first 2 iters)
+            if it>2 and np.max(np.abs(mu-prev_mu))<1e-6:break
+            prev_mu=mu.copy()
+        Sig._hmm_params=(A.copy(),mu.copy(),sig.copy())  # cache for next call
         order=np.argsort(mu);probs=gamma[-1]
         pb,pn,pbl=probs[order[0]],probs[order[1]],probs[order[2]]
         dom=["BEAR","NEUTRAL","BULL"][np.argmax([pb,pn,pbl])]
@@ -384,25 +433,37 @@ class Sig:
 
     @staticmethod
     def hurst(prices,windows=None):
-        """Layer 3: R/S Hurst exponent"""
-        if windows is None:windows=[8,12,16,24,32,48,64]
+        """Layer 3: Detrended Fluctuation Analysis (DFA) Hurst exponent.
+        Replaces R/S method which has an upward bias of ~0.55-0.65 on short series,
+        causing Strategy A (trend-following) to be overselected on random walks.
+        DFA is more reliable under 100 samples with no directional bias."""
         prices=np.array(prices,float)
-        if len(prices)<max(windows):return{"hurst":0.50,"stability":0.10}
-        rs_vals=[]
+        if len(prices)<50:return{"hurst":0.50,"stability":0.10}
+        log_p=np.log(prices+1e-10)
+        integrated=np.cumsum(log_p-log_p.mean())
+        n=len(integrated)
+        if windows is None:
+            min_w=8;max_w=max(n//4,min_w+1)
+            windows=np.unique(np.logspace(np.log10(min_w),np.log10(max_w),14).astype(int))
+            windows=[int(w)for w in windows if 4<=w<=n//2]
+        fluctuations=[];valid_wins=[]
         for w in windows:
-            if w>len(prices):continue
-            rs_list=[]
-            for st in range(0,len(prices)-w+1,max(w//2,1)):
-                seg=prices[st:st+w]
-                if len(seg)<w:continue
-                r=np.diff(np.log(seg+1e-10));mr=r.mean();d=np.cumsum(r-mr)
-                R=d.max()-d.min();S=r.std()
-                if S>1e-10:rs_list.append(R/S)
-            if rs_list:rs_vals.append((np.log(w),np.log(np.mean(rs_list))))
-        if len(rs_vals)<3:return{"hurst":0.50,"stability":0.10}
-        x=np.array([v[0]for v in rs_vals]);y=np.array([v[1]for v in rs_vals])
-        slope,_,_,_,_=sp_stats.linregress(x,y)
-        return{"hurst":float(np.clip(slope,0,1)),"stability":0.0}
+            n_segs=n//w
+            if n_segs<2:continue
+            F2=0.0
+            for seg in range(n_segs):
+                seg_data=integrated[seg*w:(seg+1)*w]
+                x=np.arange(w,dtype=float)
+                coeffs=np.polyfit(x,seg_data,1)
+                trend=np.polyval(coeffs,x)
+                residuals=seg_data-trend
+                F2+=np.mean(residuals**2)
+            F2/=n_segs
+            if F2>0:fluctuations.append(np.sqrt(F2));valid_wins.append(w)
+        if len(valid_wins)<3:return{"hurst":0.50,"stability":0.10}
+        x=np.log(valid_wins);y=np.log(fluctuations)
+        slope,_,r,_,_=sp_stats.linregress(x,y)
+        return{"hurst":float(np.clip(slope,0,1)),"stability":float(r**2)}
 
     @staticmethod
     def har_rv(closes,target_vol=VOL_TARGET):
@@ -1015,12 +1076,19 @@ class SignalTracker:
         n=len(snaps)
         if n<min_trades:return  # SAFEGUARD 1: minimum sample threshold
 
+        # SAFEGUARD 0: Chronological train/val split — snaps ordered DESC (newest first)
+        # Train on oldest 70%, validate on newest 30% to prevent look-ahead bias
+        val_n=max(int(n*0.30),10)
+        val_snaps=snaps[:val_n]   # most recent 30%
+        train_snaps=snaps[val_n:]  # oldest 70%
+        if len(train_snaps)<min_trades:train_snaps=snaps  # fallback to all if insufficient
+
         mults={};marginals={}
         for sig in SignalTracker.TRACKED:
-            active_wins=sum(1 for s in snaps if s["signals"].get(sig,0)==1 and s["win"])
-            active_total=sum(1 for s in snaps if s["signals"].get(sig,0)==1)
-            inactive_wins=sum(1 for s in snaps if s["signals"].get(sig,0)==0 and s["win"])
-            inactive_total=sum(1 for s in snaps if s["signals"].get(sig,0)==0)
+            active_wins=sum(1 for s in train_snaps if s["signals"].get(sig,0)==1 and s["win"])
+            active_total=sum(1 for s in train_snaps if s["signals"].get(sig,0)==1)
+            inactive_wins=sum(1 for s in train_snaps if s["signals"].get(sig,0)==0 and s["win"])
+            inactive_total=sum(1 for s in train_snaps if s["signals"].get(sig,0)==0)
             if active_total>=10 and inactive_total>=10:
                 # SAFEGUARD 2: Wilson score — conservative WR estimate
                 active_wr=SignalTracker._wilson_lower(active_wins,active_total)
@@ -1028,7 +1096,23 @@ class SignalTracker:
                 if inactive_wr>0.01:raw_mult=active_wr/inactive_wr
                 else:raw_mult=1.2 if active_wr>0.5 else 1.0
                 # SAFEGUARD 3: Progressive constraint relaxation
-                mults[sig]=SignalTracker._progressive_clamp(raw_mult,n)
+                candidate_mult=SignalTracker._progressive_clamp(raw_mult,n)
+                # Holdout validation: only apply weight if it improves val WR
+                val_active_wins=sum(1 for s in val_snaps if s["signals"].get(sig,0)==1 and s["win"])
+                val_active_total=sum(1 for s in val_snaps if s["signals"].get(sig,0)==1)
+                val_inactive_wins=sum(1 for s in val_snaps if s["signals"].get(sig,0)==0 and s["win"])
+                val_inactive_total=sum(1 for s in val_snaps if s["signals"].get(sig,0)==0)
+                if val_active_total>=5 and val_inactive_total>=5:
+                    val_active_wr=val_active_wins/val_active_total
+                    val_inactive_wr=val_inactive_wins/val_inactive_total
+                    # Only deviate from 1.0 if signal direction holds on holdout
+                    if (candidate_mult>1.0 and val_active_wr>val_inactive_wr) or \
+                       (candidate_mult<1.0 and val_active_wr<=val_inactive_wr):
+                        mults[sig]=candidate_mult
+                    else:
+                        mults[sig]=1.0  # holdout contradicts train — keep neutral
+                else:
+                    mults[sig]=candidate_mult  # not enough val data, trust train
             else:
                 mults[sig]=1.0  # not enough data for this signal
             # SAFEGUARD 4: Marginal contribution tracking
@@ -1734,12 +1818,13 @@ class RiskAgent(BaseAgent):
 
     def compute_size(self,balance,direction,sigs,disagree_count):
         """All 16 position sizing factors."""
-        # Step 1: Kelly
+        # Step 1: Kelly — separate cap for shorts (squeeze risk + negative funding carry)
+        kelly_cap_dir=KELLY_CAP_SHORT if direction=="SHORT" else self.kelly_cap
         trades=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' AND direction=? ORDER BY id DESC LIMIT 20",(direction,))
         if len(trades)>=10:
             pnls=[t[0]or 0 for t in trades];wins=[p for p in pnls if p>0];losses=[p for p in pnls if p<=0]
             p=len(wins)/len(pnls);b=(np.mean([abs(w)for w in wins])/(np.mean([abs(l)for l in losses])+1e-10))if losses else 1.5
-            kelly=np.clip((p*(b+1)-1)/b*KELLY_FRAC,KELLY_MIN,self.kelly_cap)
+            kelly=np.clip((p*(b+1)-1)/b*KELLY_FRAC,KELLY_MIN,kelly_cap_dir)
         else:kelly=KELLY_DEFAULT
         # Step 2: Vol targeting
         vs=sigs.get("vol_scalar",1.0)
@@ -1814,20 +1899,17 @@ class RiskAgent(BaseAgent):
             kelly*=0.50;us*=0.60
         elif vr=="HIGH":
             kelly*=0.80
-        # Step 17: Hot streak bonus (compound faster during winning streaks)
-        consec_wins=self.db.kv_get("consec_wins",0)
-        if consec_wins>=5:hot_s=1.22  # Deep streak = strong regime
-        elif consec_wins>=3:hot_s=1.15
-        elif consec_wins>=2:hot_s=1.08
-        else:hot_s=1.00
-        # Combine
-        sz=kelly*vs*scs*hs*us*ss*dds*cvs*shp*vps*dcs*bcs*oirs*cas*ads*exp_s*hot_s
-        sz=np.clip(sz,0.0,self.kelly_cap);sz_usd=balance*sz
-        # Liq safety (5x liq ~20% away, ensure 12% buffer)
+        # Combine (hot-streak sizing removed — consecutive wins don't predict future wins;
+        # gambler's fallacy baked into sizing is dangerous, use rolling Sharpe instead)
+        sz=kelly*vs*scs*hs*us*ss*dds*cvs*shp*vps*dcs*bcs*oirs*cas*ads*exp_s
+        sz=np.clip(sz,0.0,kelly_cap_dir);sz_usd=balance*sz
+        # Liq safety — use correct isolated margin formula with maintenance margin rate
         price=sigs.get("price",3000)
+        maint_rate=sigs.get("maint_margin_rate",0.005)
         if price>0:
-            notional=sz_usd*LEVERAGE;liq_dist=price/LEVERAGE*0.95
-            while liq_dist/price<0.12 and sz_usd>5:sz_usd*=0.90;notional=sz_usd*LEVERAGE;liq_dist=price/LEVERAGE*0.95
+            liq_frac=1.0/LEVERAGE-maint_rate  # fraction of price away from liq
+            liq_dist=price*liq_frac
+            while liq_dist/price<0.12 and sz_usd>5:sz_usd*=0.90;liq_dist=price*liq_frac
         return max(sz_usd,0)
 
     def analyze(self,md):
@@ -1971,7 +2053,11 @@ class ExecutionAgent(BaseAgent):
     def enter(self,direction,qty,entry_price,stop,tp1,tp2,tp3,strategy,liq,trade_id,ob=None):
         qty=self._round_qty(qty)
         if qty<self.sym_info.get("min_qty",0.001):log.error(f"Qty {qty}<min");return False
-        slices,interval=self._twap_params();fills=[];side="BUY"if direction=="LONG"else"SELL"
+        notional=qty*entry_price
+        # Skip TWAP for small notional — zero market impact at this size, TWAP only adds latency
+        if notional<5000:slices,interval=1,0;log.info(f"Single order (notional ${notional:.0f}<$5k, no TWAP)")
+        else:slices,interval=self._twap_params()
+        fills=[];side="BUY"if direction=="LONG"else"SELL"
         price_prec=self.sym_info.get("price_precision",2)
         for i in range(slices):
             placed=sum(f[1]for f in fills)
@@ -2380,8 +2466,10 @@ class MedallionBot:
                 if f["filterType"]=="LOT_SIZE":si["step_size"]=float(f["stepSize"]);si["min_qty"]=float(f["minQty"])
                 elif f["filterType"]=="PRICE_FILTER":si["tick_size"]=float(f["tickSize"])
             si["qty_precision"]=info.get("quantityPrecision",3);si["price_precision"]=info.get("pricePrecision",2)
+            # Fetch real maintenance margin rate from leverage brackets
+            si["maint_margin_rate"]=self.client.leverage_brackets(SYMBOL)
             self.db.kv_set("symbol_info",si);self.sym_info=si
-            log.info(f"✓ Symbol: step={si.get('step_size')} min={si.get('min_qty')}")
+            log.info(f"✓ Symbol: step={si.get('step_size')} min={si.get('min_qty')} maint_margin={si['maint_margin_rate']:.3%}")
         log.info("Fetching history...");df_eth=self.client.klines(SYMBOL,"1h",500)
         df_btc=self.client.klines("BTCUSDT","1h",200);df_sol=self.client.klines("SOLUSDT","1h",200)
         log.info(f"✓ ETH:{len(df_eth)} BTC:{len(df_btc)} SOL:{len(df_sol)} bars")
@@ -2530,6 +2618,8 @@ class MedallionBot:
             btc_move=abs((btc_c[-1]-btc_c[-2])/(btc_c[-2]+1e-10))if len(btc_c)>1 else 0
             s["corr_storm"]=eth_move>0.015 and btc_move>0.015
         else:s["corr_storm"]=False
+        # Maintenance margin rate from symbol_info (stored in setup via leverage_brackets)
+        s["maint_margin_rate"]=self.exec_ag.sym_info.get("maint_margin_rate",0.005)
         return s
 
     def _run_agents(self,md):
@@ -2709,15 +2799,20 @@ class MedallionBot:
                 # Confidence adjustment
                 if conf<0.60:sz*=0.70
                 elif conf>0.78:sz*=1.08
-                # Tweak: Conviction premium — when 4+ agents agree with high confidence
+                # Conviction premium — disabled during drawdown >5% (last thing you want is
+                # larger positions when losing; conviction doesn't overcome a bad regime)
                 agreeing=sum(1 for v in verdicts if v.direction==direction)
                 avg_agree_conf=np.mean([v.confidence for v in verdicts if v.direction==direction])if agreeing>0 else 0
-                if agreeing>=5 and avg_agree_conf>0.65:
-                    sz*=1.20  # 20% conviction premium — near-unanimous
-                    log.info(f"🎯 MAX CONVICTION: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +20%")
-                elif agreeing>=4 and avg_agree_conf>0.60:
-                    sz*=1.12  # 12% conviction premium — strong consensus
-                    log.info(f"🎯 CONVICTION PREMIUM: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +12%")
+                cur_dd=(self.risk_ag.peak-md["balance"])/max(self.risk_ag.peak,1)
+                if cur_dd<=0.05:
+                    if agreeing>=5 and avg_agree_conf>0.65:
+                        sz*=1.20  # 20% conviction premium — near-unanimous
+                        log.info(f"🎯 MAX CONVICTION: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +20%")
+                    elif agreeing>=4 and avg_agree_conf>0.60:
+                        sz*=1.12  # 12% conviction premium — strong consensus
+                        log.info(f"🎯 CONVICTION PREMIUM: {agreeing} agents agree @{avg_agree_conf:.2f} conf → size +12%")
+                else:
+                    log.info(f"🔒 Conviction premium suppressed (DD={cur_dd:.1%}>5%)")
                 price=md["price"];atr_val=sigs.get("atr_val",price*0.015)
                 qty=self.exec_ag._round_qty(sz*LEVERAGE/price)
                 min_qty=self.exec_ag.sym_info.get("min_qty",0.001)
@@ -2730,12 +2825,14 @@ class MedallionBot:
                     sd=max(min(atr_val*SB_STOP_ATR,price*SB_STOP_MAX),price*SB_STOP_MIN)
                     t1d=atr_val*SB_TP1_ATR;t2d=atr_val*SB_TP2_ATR
                     t3d=abs(price-sigs.get("vwap",price))  # TP3=VWAP for strategy B
+                maint_rate=sigs.get("maint_margin_rate",0.005)
+                liq_frac=1.0/LEVERAGE-maint_rate  # correct isolated margin liquidation formula
                 if direction=="LONG":
                     stop=price-sd;tp1=price+t1d;tp2=price+t2d;tp3=price+t3d
-                    liq=price*(1-1/LEVERAGE*0.95)
+                    liq=price*(1-liq_frac)
                 else:
                     stop=price+sd;tp1=price-t1d;tp2=price-t2d;tp3=price-t3d
-                    liq=price*(1+1/LEVERAGE*0.95)
+                    liq=price*(1+liq_frac)
                 # Record trade
                 tid=self.db.insert("trades",{
                     "direction":direction,"strategy":strat,"entry_price":price,"stop_price":stop,
@@ -2852,7 +2949,7 @@ class MedallionBot:
             # Track consecutive wins for hot streak sizing
             cw=self.db.kv_get("consec_wins",0)+1
             self.db.kv_set("consec_wins",cw)
-            if cw>=3:log.info(f"🔥 HOT STREAK: {cw} consecutive wins — sizing +12%")
+            if cw>=3:log.info(f"🔥 HOT STREAK: {cw} consecutive wins")
         self.db.kv_set("consec_losses",self.risk_ag.consec_losses)
         self.db.kv_set("last_stop_ts",self.risk_ag.last_stop_ts)
         # Milestone checks
@@ -2873,6 +2970,25 @@ class MedallionBot:
             self.db.insert("milestones",{"ts":utcnow(),"milestone_type":mt,"value":mv,"note":f"Milestone: {mt}={mv}"})
             log.info(f"🏆 MILESTONE: {mt} = {mv}")
         log.info(f"Trade closed:{reason}|Balance:${bal:.2f}|PnL:${bal-prev_peak:.2f}")
+        self._cleanup_db()
+
+    def _cleanup_db(self):
+        """Keep DB size bounded after each trade. Prune oldest log entries and
+        stale per-trade kv snapshots (trade_signals_, trade_features_, trade_scoring_)."""
+        try:
+            with self.db.lock:
+                # Keep last 500 rows in high-frequency log tables
+                for tbl in["vpin_log","oi_log","funding_log","alpha_log","deliberation_log","execution_log"]:
+                    self.db.conn.execute(f"DELETE FROM {tbl} WHERE id NOT IN (SELECT id FROM {tbl} ORDER BY id DESC LIMIT 500)")
+                # Purge per-trade kv snapshots for trades beyond the 300 most recent
+                old_ids=self.db.conn.execute(
+                    "SELECT id FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT -1 OFFSET 300").fetchall()
+                for (tid,) in old_ids:
+                    for pfx in["trade_signals_","trade_features_","trade_scoring_"]:
+                        self.db.conn.execute("DELETE FROM kv WHERE key=?",(f"{pfx}{tid}",))
+                self.db.conn.commit()
+        except Exception as e:
+            log.warning(f"DB cleanup error:{e}")
 
     def run(self):
         self._validate_keys()
@@ -3251,9 +3367,10 @@ class MedallionBot:
         """Walk-forward backtest with proper train/test separation and bootstrap CI."""
         self._validate_keys()
         log.info("═"*60);log.info("  WALK-FORWARD BACKTEST");log.info("═"*60)
-        log.info("Fetching 500 bars of 1h history...")
-        df=self.client.klines(SYMBOL,"1h",500)
+        log.info("Fetching 3000 bars of 1h history (paginated)...")
+        df=self.client.klines_paginated(SYMBOL,"1h",total=3000,per_page=1500)
         if len(df)<200:log.error("Not enough data for backtest");return
+        log.info(f"Fetched {len(df)} bars spanning ~{len(df)//24} days")
         closes=df["close"].values;highs=df["high"].values;lows=df["low"].values
         # ═══ PROPER TRAIN/TEST SPLIT ═══
         # First 60% for signal calibration (training), last 40% for out-of-sample test
