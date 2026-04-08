@@ -25,11 +25,11 @@ LEVERAGE=5;MARGIN_TYPE="ISOLATED";SCAN_INTERVAL=30
 DB_FILE="medallion.db";LOG_FILE="medallion.log"
 # Strategy A (trend-following, 5x) — TP levels pushed out for better R:R
 SA_STOP_ATR=1.0;SA_TP1_ATR=1.8;SA_TP1_FRAC=0.40;SA_TP2_ATR=3.0;SA_TP2_FRAC=0.30
-SA_TP3_ATR=5.5;SA_TP3_FRAC=0.30;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=24
+SA_TP3_ATR=5.5;SA_TP3_FRAC=0.30;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=28
 SA_STOP_MIN=0.008;SA_STOP_MAX=0.018
 # Strategy B (mean-reversion, 5x) — faster TP1 lock + extended hold window
 SB_STOP_ATR=0.7;SB_TP1_ATR=0.6;SB_TP1_FRAC=0.50;SB_TP2_ATR=1.4;SB_TP2_FRAC=0.30
-SB_TP3_FRAC=0.20;SB_MIN_SCORE=21;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
+SB_TP3_FRAC=0.20;SB_MIN_SCORE=24;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
 # Hurst
 H_TREND_STRONG=0.60;H_TREND=0.55;H_MR=0.45;H_MR_STRONG=0.35
 # Sizing
@@ -80,10 +80,10 @@ def is_options_expiry():
     return abs(now.day-last_friday)<=1
 def session_params():
     s=get_session()
-    if s=="ASIAN":return{"min_score":26,"size_mult":0.65,"vpin_thresh":0.55,"label":"ASIAN — Reduced"}
+    if s=="ASIAN":return{"min_score":30,"size_mult":0.65,"vpin_thresh":0.55,"label":"ASIAN — Reduced"}
     elif s=="EU":return{"min_score":SA_MIN_SCORE,"size_mult":1.00,"vpin_thresh":VPIN_GATE,"label":"EU — Full"}
-    elif s=="US":return{"min_score":23,"size_mult":1.05,"vpin_thresh":VPIN_GATE,"label":"US — Peak"}
-    else:return{"min_score":26,"size_mult":0.60,"vpin_thresh":0.50,"label":"DEAD — Minimum"}
+    elif s=="US":return{"min_score":26,"size_mult":1.05,"vpin_thresh":VPIN_GATE,"label":"US — Peak"}
+    else:return{"min_score":30,"size_mult":0.60,"vpin_thresh":0.50,"label":"DEAD — Minimum"}
 
 @dataclass
 class AgentVerdict:
@@ -1821,7 +1821,7 @@ class RiskAgent(BaseAgent):
         # 21. OI extreme
         if sigs.get("oi_extreme",False):
             score=max(sigs.get("long_score",0),sigs.get("short_score",0))
-            if score<29:return False,f"OI EXTREME: score {score}<29",21
+            if score<35:return False,f"OI EXTREME: score {score}<35",21
         # 22. Funding+OI confluence against
         if sigs.get("foi_against",False):return False,"FUNDING+OI AGAINST DIRECTION",22
         # 23. DYNAMIC SESSION BLOCK (uses cached expectancy — refreshed after each trade close)
@@ -1850,12 +1850,12 @@ class RiskAgent(BaseAgent):
         vs=sigs.get("vol_scalar",1.0)
         # Step 3: Confluence — smooth gradient sizing (thresholds scaled for sqrt-normalized scores)
         sc=max(sigs.get("long_score",0),sigs.get("short_score",0))
-        if sc>=34:scs=1.25
-        elif sc>=32:scs=1.18
-        elif sc>=30:scs=1.10
-        elif sc>=28:scs=1.00
-        elif sc>=26:scs=0.90
-        elif sc>=24:scs=0.80
+        if sc>=38:scs=1.25
+        elif sc>=35:scs=1.18
+        elif sc>=32:scs=1.10
+        elif sc>=30:scs=1.00
+        elif sc>=28:scs=0.90
+        elif sc>=26:scs=0.80
         else:scs=0.70
         # Step 4: Hurst — reward strong trends more
         h=sigs.get("hurst",0.5)
@@ -2449,7 +2449,7 @@ class ArbiterAgent(BaseAgent):
         # Phase E: Confluence
         sess=get_session();sp=session_params()
         min_s=sp["min_score"]if strategy!="B"else SB_MIN_SCORE
-        if strategy=="A"and sess=="US":min_s=23
+        if strategy=="A"and sess=="US":min_s=26
         if score<min_s:return"SKIP",ac,f"Score {score:.0f}<{min_s}",""
         # Phase F: GO
         sz_note=""
@@ -3473,7 +3473,7 @@ class MedallionBot:
             dd=(peak-equity)/peak if peak>0 else 0
             if dd>KILL_SWITCH_DD:continue
             if consec_losses>=5:continue
-            if sigs["hmm_uncertain"]and score<29:continue
+            if sigs["hmm_uncertain"]and score<33:continue
             uf=0
             if sigs["hmm_uncertain"]:uf+=1
             if sigs.get("entropy",0)>1.20:uf+=1
@@ -3488,10 +3488,12 @@ class MedallionBot:
                 kelly=np.clip((p_win*(b_ratio+1)-1)/b_ratio*KELLY_FRAC,KELLY_MIN,kelly_cap_dir)
             else:kelly=KELLY_DEFAULT
             vs=sigs.get("vol_scalar",1.0)
-            if score>=34:scs=1.25
-            elif score>=30:scs=1.10
-            elif score>=28:scs=1.00
-            elif score>=24:scs=0.80
+            if score>=38:scs=1.25
+            elif score>=35:scs=1.18
+            elif score>=32:scs=1.10
+            elif score>=30:scs=1.00
+            elif score>=28:scs=0.90
+            elif score>=26:scs=0.80
             else:scs=0.70
             if dd>0.08:dds=0.40
             elif dd>0.05:dds=0.65
