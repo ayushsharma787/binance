@@ -25,11 +25,11 @@ LEVERAGE=5;MARGIN_TYPE="ISOLATED";SCAN_INTERVAL=30
 DB_FILE="medallion.db";LOG_FILE="medallion.log"
 # Strategy A (trend-following, 5x) — TP levels pushed out for better R:R
 SA_STOP_ATR=1.0;SA_TP1_ATR=1.8;SA_TP1_FRAC=0.40;SA_TP2_ATR=3.0;SA_TP2_FRAC=0.30
-SA_TP3_ATR=5.5;SA_TP3_FRAC=0.30;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=68
+SA_TP3_ATR=5.5;SA_TP3_FRAC=0.30;SA_TRAIL_ATR=0.8;SA_MIN_SCORE=24
 SA_STOP_MIN=0.008;SA_STOP_MAX=0.018
 # Strategy B (mean-reversion, 5x) — faster TP1 lock + extended hold window
 SB_STOP_ATR=0.7;SB_TP1_ATR=0.6;SB_TP1_FRAC=0.50;SB_TP2_ATR=1.4;SB_TP2_FRAC=0.30
-SB_TP3_FRAC=0.20;SB_MIN_SCORE=58;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
+SB_TP3_FRAC=0.20;SB_MIN_SCORE=21;SB_MAX_HOLD_H=8;SB_STOP_MIN=0.005;SB_STOP_MAX=0.012
 # Hurst
 H_TREND_STRONG=0.60;H_TREND=0.55;H_MR=0.45;H_MR_STRONG=0.35
 # Sizing
@@ -80,10 +80,10 @@ def is_options_expiry():
     return abs(now.day-last_friday)<=1
 def session_params():
     s=get_session()
-    if s=="ASIAN":return{"min_score":73,"size_mult":0.65,"vpin_thresh":0.55,"label":"ASIAN — Reduced"}
+    if s=="ASIAN":return{"min_score":26,"size_mult":0.65,"vpin_thresh":0.55,"label":"ASIAN — Reduced"}
     elif s=="EU":return{"min_score":SA_MIN_SCORE,"size_mult":1.00,"vpin_thresh":VPIN_GATE,"label":"EU — Full"}
-    elif s=="US":return{"min_score":65,"size_mult":1.05,"vpin_thresh":VPIN_GATE,"label":"US — Peak"}
-    else:return{"min_score":73,"size_mult":0.60,"vpin_thresh":0.50,"label":"DEAD — Minimum"}
+    elif s=="US":return{"min_score":23,"size_mult":1.05,"vpin_thresh":VPIN_GATE,"label":"US — Peak"}
+    else:return{"min_score":26,"size_mult":0.60,"vpin_thresh":0.50,"label":"DEAD — Minimum"}
 
 @dataclass
 class AgentVerdict:
@@ -265,7 +265,7 @@ class BinanceClient:
         try:
             st=self._req("GET",f"{FAPI}/fapi/v1/time")
             if st and"serverTime"in st:self.time_offset=st["serverTime"]-int(time.time()*1000);log.info(f"Time synced offset={self.time_offset}ms")
-        except:pass
+        except Exception as e:log.debug(f"Time sync failed:{e}")
     def ping(self):r=self._req("GET",f"{FAPI}/fapi/v1/ping");return r is not None
     def balance(self):
         r=self._req("GET",f"{FAPI}/fapi/v2/balance",signed=True)
@@ -660,7 +660,7 @@ class Sig:
             avg_ask=np.mean([float(a[1])for a in curr_ob.get("asks",[])[:10]])if curr_ob.get("asks")else 1
             for price,qty in prev_asks.items():
                 if qty>5*avg_ask and price not in curr_asks:return True
-        except:pass
+        except Exception as e:log.debug(f"Spoof detect:{e}")
         return False
 
     @staticmethod
@@ -701,7 +701,7 @@ class Sig:
                 for price,count in refill_tracker.items():
                     if count>5:
                         return True,side,refill_tracker
-        except:pass
+        except Exception as e:log.debug(f"Refill hunt detect:{e}")
         return False,"",refill_tracker
 
     @staticmethod
@@ -770,12 +770,10 @@ class Sig:
 
     @staticmethod
     def btc_crash_check(btc_df):
-        """ETH-specific: BTC crash gate"""
-        if len(btc_df)<12:return False
+        """ETH-specific: BTC crash gate — detects >3% BTC drop in last bar"""
+        if len(btc_df)<2:return False
         c=btc_df["close"].values
-        ret_1h=(c[-1]-c[-1])/(c[-1]+1e-10)if len(c)>1 else 0
-        # Use 12 5-min bars = 1 hour
-        if len(c)>=2:ret_1h=(c[-1]-c[-2])/(c[-2]+1e-10)
+        ret_1h=(c[-1]-c[-2])/(c[-2]+1e-10)
         return ret_1h<-0.03
 
     @staticmethod
@@ -936,6 +934,16 @@ class Confluence:
         div=s.get("btc_divergence",0)
         if div>0:ls+=div
         elif div<0:ss+=abs(div)
+        # Normalize: score/sqrt(n_active) rewards signal quality over quantity
+        # 4 signals at 15pts = 60/sqrt(4) = 30 beats 12 signals at 5pts = 60/sqrt(12) = 17
+        n_l=sum(1 for x in[kv>kt,kv>kt and ka>0,hb>0.55,hu>0.55,el>0.55,
+            s.get("price",0)>s.get("vwap",0),s.get("st_1h",0)>0,s.get("st_4h",0)>0,
+            s.get("ema8",0)>s.get("ema21",0),sk<50,fr<0,ca>0.5,vp<0.40,bp>0.40]if x)
+        n_s=sum(1 for x in[kv<-kt,kv<-kt and ka<0,hbe>0.55,hu>0.55,es>0.55,
+            s.get("price",0)<s.get("vwap",0),s.get("st_1h",0)<0,s.get("st_4h",0)<0,
+            s.get("ema8",0)<s.get("ema21",0),sk>50,fr>0.0005,ca<-0.5,vp<0.40,bp<-0.40]if x)
+        if n_l>1:ls=int(ls/math.sqrt(n_l))
+        if n_s>1:ss=int(ss/math.sqrt(n_s))
         return max(ls,0),max(ss,0)
 
     @staticmethod
@@ -958,6 +966,13 @@ class Confluence:
         if s.get("absorption",False):ls+=8;ss+=8
         if s.get("oi_extreme",False)and s.get("funding_extreme",False):ls+=20;ss+=20
         if s.get("micro_confirms",False):ls+=10;ss+=10
+        # Normalize by sqrt(n_active) — same logic as score_a
+        n_b=sum(1 for x in[at>0 and abs(p-vw)>2*at,sk<15 or sk>85,
+            s.get("bb_width_pct",50)<30,s.get("st_4h_opposing",False),
+            s.get("vol_scalar",1)>1.0,vp<0.55,s.get("adverse_sel",0.5)<0.40,
+            s.get("absorption",False),s.get("oi_extreme",False)and s.get("funding_extreme",False),
+            s.get("micro_confirms",False)]if x)
+        if n_b>1:ls=int(ls/math.sqrt(n_b));ss=int(ss/math.sqrt(n_b))
         return max(ls,0),max(ss,0)
 
 # ═══ SIGNAL TRACKER — Learns which signals actually contribute to wins ═══
@@ -1731,10 +1746,20 @@ class RiskAgent(BaseAgent):
         self.consec_as=0
         self.sizing_tier=db.kv_get("sizing_tier","BASE")
         self.kelly_cap=KELLY_CAP;self.vol_target=VOL_TARGET
+        # Cached expectancy (recomputed after each trade close, not every 30s scan)
+        self._session_exp={};self._dir_exp={}
         # Milestone sizing
         bal=db.kv_get("peak_equity",300)
         for thresh,kc,vt in MILESTONES:
             if bal>=thresh:self.kelly_cap=kc;self.vol_target=vt;self.sizing_tier=f"${thresh}+"
+    def refresh_expectancy_cache(self):
+        """Recompute session/direction expectancy. Called after each trade close."""
+        for sess in["ASIAN","EU","US","DEAD"]:
+            rows=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' AND session=? ORDER BY id DESC LIMIT 30",(sess,))
+            self._session_exp[sess]=np.mean([t[0]or 0 for t in rows])if len(rows)>=15 else 0.0
+        for d in["LONG","SHORT"]:
+            rows=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' AND direction=? ORDER BY id DESC LIMIT 20",(d,))
+            self._dir_exp[d]=np.mean([t[0]or 0 for t in rows])if len(rows)>=15 else 0.0
     def update_milestones(self,balance):
         changed=False
         for thresh,kc,vt in MILESTONES:
@@ -1796,24 +1821,19 @@ class RiskAgent(BaseAgent):
         # 21. OI extreme
         if sigs.get("oi_extreme",False):
             score=max(sigs.get("long_score",0),sigs.get("short_score",0))
-            if score<83:return False,f"OI EXTREME: score {score}<83",21
+            if score<29:return False,f"OI EXTREME: score {score}<29",21
         # 22. Funding+OI confluence against
         if sigs.get("foi_against",False):return False,"FUNDING+OI AGAINST DIRECTION",22
-        # 23. DYNAMIC SESSION BLOCK — blocks sessions with proven negative expectancy
+        # 23. DYNAMIC SESSION BLOCK (uses cached expectancy — refreshed after each trade close)
         sess=get_session();direction=sigs.get("proposed_dir","")
-        sess_trades=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' AND session=? ORDER BY id DESC LIMIT 30",(sess,))
-        if len(sess_trades)>=15:
-            pnls=[t[0]or 0 for t in sess_trades]
-            sess_exp=np.mean(pnls)
-            if sess_exp<-0.008:  # expectancy worse than -0.8% per trade in this session
-                return False,f"SESSION EXPECTANCY GATE: {sess} exp={sess_exp:+.2%} over {len(sess_trades)} trades",23
-        # 24. DIRECTION EXPECTANCY — blocks direction if it's consistently losing
+        sess_exp=self._session_exp.get(sess,0)
+        if sess_exp<-0.008:
+            return False,f"SESSION EXPECTANCY GATE: {sess} exp={sess_exp:+.2%}",23
+        # 24. DIRECTION EXPECTANCY (cached)
         if direction:
-            dir_trades=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' AND direction=? ORDER BY id DESC LIMIT 20",(direction,))
-            if len(dir_trades)>=15:
-                dir_exp=np.mean([t[0]or 0 for t in dir_trades])
-                if dir_exp<-0.01:  # consistently losing in this direction
-                    return False,f"DIRECTION EXPECTANCY GATE: {direction} exp={dir_exp:+.2%} over {len(dir_trades)} trades",24
+            dir_exp=self._dir_exp.get(direction,0)
+            if dir_exp<-0.01:
+                return False,f"DIRECTION EXPECTANCY GATE: {direction} exp={dir_exp:+.2%}",24
         return True,"ALL 24 GATES PASSED",0
 
     def compute_size(self,balance,direction,sigs,disagree_count):
@@ -1828,14 +1848,14 @@ class RiskAgent(BaseAgent):
         else:kelly=KELLY_DEFAULT
         # Step 2: Vol targeting
         vs=sigs.get("vol_scalar",1.0)
-        # Step 3: Confluence — smooth gradient sizing
+        # Step 3: Confluence — smooth gradient sizing (thresholds scaled for sqrt-normalized scores)
         sc=max(sigs.get("long_score",0),sigs.get("short_score",0))
-        if sc>=95:scs=1.25
-        elif sc>=90:scs=1.18
-        elif sc>=85:scs=1.10
-        elif sc>=78:scs=1.00
-        elif sc>=72:scs=0.90
-        elif sc>=68:scs=0.80
+        if sc>=34:scs=1.25
+        elif sc>=32:scs=1.18
+        elif sc>=30:scs=1.10
+        elif sc>=28:scs=1.00
+        elif sc>=26:scs=0.90
+        elif sc>=24:scs=0.80
         else:scs=0.70
         # Step 4: Hurst — reward strong trends more
         h=sigs.get("hurst",0.5)
@@ -1893,15 +1913,25 @@ class RiskAgent(BaseAgent):
         ads=[1.0,0.85,0.65][min(disagree_count,2)]
         # Step 16: Options expiry
         exp_s=0.80 if is_options_expiry()else 1.0
+        # Step 17: Rolling Sharpe regime quality (replaces gambler's-fallacy hot streak)
+        recent_all=self.db.query("SELECT total_pnl_pct FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT 20")
+        if len(recent_all)>=10:
+            rpnls=np.array([t[0]or 0 for t in recent_all])
+            rolling_sharpe=np.mean(rpnls)/(np.std(rpnls)+1e-10)*np.sqrt(252)
+            if rolling_sharpe>2.0:sharpe_s=1.18  # strong regime — lean in
+            elif rolling_sharpe>1.0:sharpe_s=1.08
+            elif rolling_sharpe>0:sharpe_s=1.00
+            elif rolling_sharpe>-1.0:sharpe_s=0.85
+            else:sharpe_s=0.65  # bleeding — shrink
+        else:sharpe_s=1.0
         # ETH vol regime
         vr=sigs.get("vol_regime","NORMAL")
         if vr=="EXTREME":
             kelly*=0.50;us*=0.60
         elif vr=="HIGH":
             kelly*=0.80
-        # Combine (hot-streak sizing removed — consecutive wins don't predict future wins;
-        # gambler's fallacy baked into sizing is dangerous, use rolling Sharpe instead)
-        sz=kelly*vs*scs*hs*us*ss*dds*cvs*shp*vps*dcs*bcs*oirs*cas*ads*exp_s
+        # Combine all 17 sizing factors
+        sz=kelly*vs*scs*hs*us*ss*dds*cvs*shp*vps*dcs*bcs*oirs*cas*ads*exp_s*sharpe_s
         sz=np.clip(sz,0.0,kelly_cap_dir);sz_usd=balance*sz
         # Liq safety — use correct isolated margin formula with maintenance margin rate
         price=sigs.get("price",3000)
@@ -2268,7 +2298,7 @@ class ExecutionAgent(BaseAgent):
                 if carry_favorable:max_hold+=(2*3600)
                 if hold_secs>max_hold:
                     self._close_all(price,f"MAX_HOLD_{SB_MAX_HOLD_H}H");return"MAX_HOLD"
-            except:pass
+            except Exception as e:log.warning(f"Hold check error:{e}",exc_info=True)
         self._save_pos();return None
     def _close_partial(self,qty,price,reason):
         side="SELL"if self.pos.direction=="LONG"else"BUY"
@@ -2290,7 +2320,7 @@ class ExecutionAgent(BaseAgent):
         try:
             opened=datetime.strptime(self.pos.opened_at,"%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             hold_hours=(datetime.now(timezone.utc)-opened).total_seconds()/3600
-        except:pass
+        except Exception as e:log.warning(f"Hold hours calc error:{e}")
         funding_pnl=-fr*(hold_hours/8)*LEVERAGE if self.pos.direction=="LONG"else fr*(hold_hours/8)*LEVERAGE
         self.db.update("trades",self.pos.trade_id,{"status":"CLOSED","exit_reason":reason,
             "total_pnl":pnl_lev,"total_pnl_pct":pnl_lev,"mfe_pct":self.pos.mfe,"mae_pct":self.pos.mae,
@@ -2419,7 +2449,7 @@ class ArbiterAgent(BaseAgent):
         # Phase E: Confluence
         sess=get_session();sp=session_params()
         min_s=sp["min_score"]if strategy!="B"else SB_MIN_SCORE
-        if strategy=="A"and sess=="US":min_s=65
+        if strategy=="A"and sess=="US":min_s=23
         if score<min_s:return"SKIP",ac,f"Score {score:.0f}<{min_s}",""
         # Phase F: GO
         sz_note=""
@@ -2639,7 +2669,7 @@ class MedallionBot:
             self.risk_ag.analyze(md)
             for i,v in enumerate(verdicts):
                 if v.agent_name=="Risk":verdicts[i]=self.risk_ag.verdict;break
-        except:pass
+        except Exception as e:log.warning(f"Risk agent re-run error:{e}",exc_info=True)
         # Phase 2-3: Communication and revision
         self.messages=[]
         for ag in self.agents:
@@ -2652,7 +2682,7 @@ class MedallionBot:
                         msg=AgentMessage(sender=ag.name,recipient="ALL",msg_type="INFORM",
                             content=rv.revision_notes,priority=3,ts=time.time())
                         self.messages.append(msg);self.db.log_msg(self.scan_num,msg)
-            except:pass
+            except Exception as e:log.warning(f"Agent {ag.name} communicate error:{e}",exc_info=True)
         # Update agent opponent counts
         consensus_dir="LONG"if sigs.get("agents_long",0)>sigs.get("agents_short",0)else"SHORT"
         sigs["agents_oppose_long"]=sum(1 for v in verdicts if v.direction=="SHORT")
@@ -2913,6 +2943,7 @@ class MedallionBot:
                 snap["win"]=profitable
                 self.db.kv_set(f"trade_signals_{last_trade[0]}",snap)
             SignalTracker.update_weights(self.db,min_trades=50)
+            self.risk_ag.refresh_expectancy_cache()
             # Retrain logistic model every 10 trades after reaching 100
             total_closed=self.db.query_one("SELECT count(*) FROM trades WHERE status='CLOSED'")[0]or 0
             if total_closed>=100 and total_closed%10==0:
@@ -3099,9 +3130,19 @@ class MedallionBot:
         # GBM model status
         gm=self.db.kv_get("gbm_model")
         if gm:
-            log.info(f"\n🌲 GBM model: {gm.get('n_stumps',0)} stumps, {gm.get('n_trades',0)} trades, accuracy={gm.get('accuracy',0):.1%}")
+            n_trees=gm.get('n_trees',0)
+            log.info(f"\n🌲 GBM model: {n_trees} depth-3 trees, {gm.get('n_trades',0)} trades, accuracy={gm.get('accuracy',0):.1%}")
+            if gm.get("separate",False):
+                log.info(f"  LONG model: {len(gm.get('long_trees',[]))} trees, acc={gm.get('long_acc',0):.1%}")
+                log.info(f"  SHORT model: {len(gm.get('short_trees',[]))} trees, acc={gm.get('short_acc',0):.1%}")
+            def _count_splits(tree,counts):
+                if not tree or tree.get("leaf"):return
+                counts[tree["f"]]+=1
+                _count_splits(tree.get("left",{}),counts)
+                _count_splits(tree.get("right",{}),counts)
             fc=np.zeros(len(LogisticScorer.FEATURES))
-            for s in gm.get("stumps",[]):fc[s["f"]]+=1
+            all_trees=gm.get("long_trees",[])+gm.get("short_trees",gm.get("trees",[]))
+            for t in all_trees:_count_splits(t,fc)
             top=sorted(zip(LogisticScorer.FEATURES,fc),key=lambda x:-x[1])[:5]
             log.info("  Top split features (interaction drivers):")
             for name,cnt in top:
@@ -3236,7 +3277,7 @@ class MedallionBot:
                 try:
                     h=int(t[3].split(" ")[1].split(":")[0])
                     loss_hours.append(h)
-                except:pass
+                except Exception as e:log.debug(f"Loss hour parse:{e}")
         if loss_hours:
             hour_counts=np.zeros(24)
             for h in loss_hours:
@@ -3363,6 +3404,182 @@ class MedallionBot:
                           "pnl_usd":margin*pnl,"exit":exit_reason,"equity":equity})
         return trades
 
+    def _simulate_trades_full(self,df_1h,df_4h=None,start_equity=300.0,train_end=200):
+        """Full-pipeline backtest: replays historical data through actual Confluence scoring,
+        risk gate subset, Kelly sizing, and proper multi-TP/trailing-stop exits.
+        No live API calls — microstructure data gets conservative defaults."""
+        equity=start_equity;peak=start_equity;trades=[]
+        consec_losses=0;trades_today=0;daily_pnl=0;last_day=""
+        fee_rate=0.0004;min_lookback=200;min_hold_bars=3;last_exit_bar=0
+        for bar_idx in range(max(train_end,min_lookback),len(df_1h)-1):
+            # Daily reset
+            current_day=str(df_1h["ot"].iloc[bar_idx])[:10]
+            if current_day!=last_day:trades_today=0;daily_pnl=0;last_day=current_day
+            if trades_today>=MAX_TRADES_DAY:continue
+            if bar_idx-last_exit_bar<min_hold_bars:continue
+            # Build lookback window
+            window=df_1h.iloc[max(0,bar_idx-500):bar_idx+1].copy()
+            if len(window)<100:continue
+            c=window["close"].values;price=c[-1]
+            # ═══ SIGNAL COMPUTATION ═══
+            sigs={"price":price,"session":"EU"}
+            hd=Sig.hurst(c[-100:]);hurst=hd["hurst"];sigs["hurst"]=hurst
+            if H_MR<=hurst<=H_TREND:continue
+            strategy="A"if hurst>H_TREND else"B"
+            lr=np.diff(np.log(c[-200:]+1e-10))
+            hmm=Sig.hmm(lr);sigs["hmm_bull"]=hmm["p_bull"];sigs["hmm_bear"]=hmm["p_bear"]
+            sigs["hmm_uncertain"]=hmm.get("uncertain",False)
+            kd=Sig.kalman(c[-200:]);sigs["kalman_vel"]=kd["velocity"]
+            sigs["kalman_acc"]=kd["acceleration"];sigs["kalman_thresh"]=kd["threshold"]
+            har=Sig.har_rv(c);sigs["vol_scalar"]=har.get("vol_scalar",1.0)
+            sigs["vol_pct"]=har.get("vol_pct",50)
+            sigs["vol_regime"]=Sig.eth_vol_regime(har.get("daily_vol",0.04))
+            sigs["atr_val"]=Sig.atr(window);sigs["vwap"]=Sig.vwap(window)
+            sigs["rsi_1h"]=Sig.rsi(c);sr=Sig.stoch_rsi(c);sigs["stoch_k"]=sr["k"]
+            sigs["ema8"]=Sig.ema(c,8);sigs["ema21"]=Sig.ema(c,21)
+            bb=Sig.bollinger(c);sigs["bb_width_pct"]=bb["width_pct"]
+            sigs["st_1h"]=Sig.supertrend(window,ST_1H_P,ST_1H_M)
+            if df_4h is not None and len(df_4h)>10:
+                ct=df_1h["ot"].iloc[bar_idx]
+                d4w=df_4h[df_4h["ot"]<=ct].tail(100)
+                if len(d4w)>10:
+                    sigs["st_4h"]=Sig.supertrend(d4w,ST_4H_P,ST_4H_M)
+                    sigs["st_4h_opposing"]=sigs.get("st_1h",0)!=sigs.get("st_4h",0)
+            vr=window["volume"].iloc[-1]/(window["volume"].iloc[-21:-1].mean()+1e-10)if len(window)>21 else 1
+            sigs["vol_ratio"]=vr
+            sigs["ensemble_long"]=kd["signal"]if kd["signal"]>0 else 0
+            sigs["ensemble_short"]=-kd["signal"]if kd["signal"]<0 else 0
+            # Conservative defaults for unavailable microstructure
+            sigs.update({"vpin":0.40,"book_pressure":0,"adverse_sel":0.35,"spread_bps":2.0,
+                "manipulation":False,"oi_scenario":"","oi_extreme":False,"funding_rate":0.0001,
+                "funding_term":"FLAT","funding_extreme":False,"cross_asset":0,"btc_divergence":0,
+                "freshness":0.9,"avg_corr":0.3,"entropy":0.8,"min_bayes_weight":0.5,
+                "all_bayes_above_60":False,"bayesian_consensus":0.5,"avg_mi":0.10,
+                "has_position":False,"maint_margin_rate":0.005,"agents_long":0,"agents_short":0,
+                "agents_oppose_long":0,"agents_oppose_short":0,"agent_near_veto":False,
+                "corr_storm":False,"eff_spread":2.0,"book_depth":999999})
+            # ═══ CONFLUENCE SCORING ═══
+            if strategy=="A":ls,ss=Confluence.score_a(sigs)
+            else:ls,ss=Confluence.score_b(sigs)
+            sigs["long_score"]=ls;sigs["short_score"]=ss
+            score=max(ls,ss)
+            if ls>ss and ls>=SA_MIN_SCORE:direction="LONG"
+            elif ss>ls and ss>=(SA_MIN_SCORE if strategy=="A"else SB_MIN_SCORE):direction="SHORT"
+            else:continue
+            # ═══ RISK GATES (backtest subset) ═══
+            dd=(peak-equity)/peak if peak>0 else 0
+            if dd>KILL_SWITCH_DD:continue
+            if consec_losses>=5:continue
+            if sigs["hmm_uncertain"]and score<29:continue
+            uf=0
+            if sigs["hmm_uncertain"]:uf+=1
+            if sigs.get("entropy",0)>1.20:uf+=1
+            if uf>=3:continue
+            # ═══ POSITION SIZING ═══
+            kelly_cap_dir=KELLY_CAP_SHORT if direction=="SHORT"else KELLY_CAP
+            if len(trades)>=10:
+                recent=[t["pnl"]for t in trades[-20:]]
+                wins_r=[p for p in recent if p>0];losses_r=[p for p in recent if p<=0]
+                p_win=len(wins_r)/len(recent)
+                b_ratio=(np.mean([abs(w)for w in wins_r])/(np.mean([abs(l)for l in losses_r])+1e-10))if losses_r else 1.5
+                kelly=np.clip((p_win*(b_ratio+1)-1)/b_ratio*KELLY_FRAC,KELLY_MIN,kelly_cap_dir)
+            else:kelly=KELLY_DEFAULT
+            vs=sigs.get("vol_scalar",1.0)
+            if score>=34:scs=1.25
+            elif score>=30:scs=1.10
+            elif score>=28:scs=1.00
+            elif score>=24:scs=0.80
+            else:scs=0.70
+            if dd>0.08:dds=0.40
+            elif dd>0.05:dds=0.65
+            elif dd>0.03:dds=0.85
+            else:dds=1.00
+            sz_frac=np.clip(kelly*vs*scs*dds,0.0,kelly_cap_dir)
+            margin=equity*sz_frac
+            if margin<5:continue
+            # ═══ TRADE SIMULATION (multi-TP, trailing stop) ═══
+            atr_val=sigs["atr_val"]
+            if atr_val<=0:atr_val=price*0.015
+            entry=price
+            if strategy=="A":
+                stop_d=max(min(atr_val*SA_STOP_ATR,entry*SA_STOP_MAX),entry*SA_STOP_MIN)
+                tp1_d=atr_val*SA_TP1_ATR;tp2_d=atr_val*SA_TP2_ATR;tp3_d=atr_val*SA_TP3_ATR
+            else:
+                stop_d=max(min(atr_val*SB_STOP_ATR,entry*SB_STOP_MAX),entry*SB_STOP_MIN)
+                tp1_d=atr_val*SB_TP1_ATR;tp2_d=atr_val*SB_TP2_ATR
+                tp3_d=abs(entry-sigs.get("vwap",entry))
+            if direction=="LONG":stop=entry-stop_d;tp1=entry+tp1_d;tp2=entry+tp2_d;tp3=entry+tp3_d
+            else:stop=entry+stop_d;tp1=entry-tp1_d;tp2=entry-tp2_d;tp3=entry-tp3_d
+            pnl=0;exit_reason="HOLD";tp1_hit=False;tp2_hit=False
+            qty_frac=1.0;realized=0.0;trail_price=0
+            max_bars=10 if strategy=="A"else min(SB_MAX_HOLD_H,10)
+            exit_j=0
+            for j in range(1,min(max_bars+1,len(df_1h)-bar_idx)):
+                bar_h=df_1h["high"].values[bar_idx+j]
+                bar_l=df_1h["low"].values[bar_idx+j]
+                bar_c=df_1h["close"].values[bar_idx+j]
+                if direction=="LONG":unr=(bar_c-entry)/entry
+                else:unr=(entry-bar_c)/entry
+                # STOP
+                if direction=="LONG"and bar_l<=stop:
+                    pnl=realized+(stop-entry)/entry*LEVERAGE*qty_frac;exit_reason="STOP";exit_j=j;break
+                if direction=="SHORT"and bar_h>=stop:
+                    pnl=realized+(entry-stop)/entry*LEVERAGE*qty_frac;exit_reason="STOP";exit_j=j;break
+                # TP1
+                if not tp1_hit:
+                    hit=(direction=="LONG"and bar_h>=tp1)or(direction=="SHORT"and bar_l<=tp1)
+                    if hit:
+                        tp1f=SA_TP1_FRAC if strategy=="A"else SB_TP1_FRAC
+                        if direction=="LONG":realized+=(tp1-entry)/entry*LEVERAGE*tp1f
+                        else:realized+=(entry-tp1)/entry*LEVERAGE*tp1f
+                        qty_frac-=tp1f;tp1_hit=True
+                        stop=entry+entry*0.001 if direction=="LONG"else entry-entry*0.001
+                # TP2
+                if tp1_hit and not tp2_hit:
+                    hit=(direction=="LONG"and bar_h>=tp2)or(direction=="SHORT"and bar_l<=tp2)
+                    if hit:
+                        tp2f=SA_TP2_FRAC if strategy=="A"else SB_TP2_FRAC
+                        if direction=="LONG":realized+=(tp2-entry)/entry*LEVERAGE*tp2f
+                        else:realized+=(entry-tp2)/entry*LEVERAGE*tp2f
+                        qty_frac-=tp2f;tp2_hit=True;trail_price=bar_c
+                # Trailing stop after TP2
+                if tp2_hit and qty_frac>0:
+                    trail_d=atr_val*(SA_TRAIL_ATR if strategy=="A"else 0.6)
+                    if direction=="LONG":
+                        new_trail=bar_c-trail_d
+                        if new_trail>trail_price:trail_price=new_trail
+                        if bar_l<=trail_price:
+                            realized+=(trail_price-entry)/entry*LEVERAGE*qty_frac
+                            pnl=realized;exit_reason="TRAIL";exit_j=j;break
+                    else:
+                        new_trail=bar_c+trail_d
+                        if trail_price==0 or new_trail<trail_price:trail_price=new_trail
+                        if bar_h>=trail_price:
+                            realized+=(entry-trail_price)/entry*LEVERAGE*qty_frac
+                            pnl=realized;exit_reason="TRAIL";exit_j=j;break
+                # TP3
+                if tp1_hit and qty_frac>0 and tp3_d>0:
+                    hit=(direction=="LONG"and bar_h>=tp3)or(direction=="SHORT"and bar_l<=tp3)
+                    if hit:
+                        if direction=="LONG":realized+=(tp3-entry)/entry*LEVERAGE*qty_frac
+                        else:realized+=(entry-tp3)/entry*LEVERAGE*qty_frac
+                        pnl=realized;exit_reason="TP3";exit_j=j;break
+                # End of max hold
+                if j==min(max_bars,len(df_1h)-bar_idx-1):
+                    pnl=realized+unr*LEVERAGE*qty_frac;exit_reason="MAX_HOLD";exit_j=j;break
+            # Fees and slippage
+            pnl-=fee_rate*2;pnl-=0.0003
+            trade_pnl_usd=margin*pnl;equity+=trade_pnl_usd
+            if equity>peak:peak=equity
+            trades_today+=1;daily_pnl+=pnl
+            last_exit_bar=bar_idx+max(exit_j,1)
+            if pnl<=0:consec_losses+=1
+            else:consec_losses=0
+            trades.append({"dir":direction,"strat":strategy,"entry":entry,"pnl":pnl,
+                "pnl_usd":trade_pnl_usd,"exit":exit_reason,"equity":equity,
+                "score":score,"hurst":hurst,"dd":dd,"bar":bar_idx})
+        return trades
+
     def backtest(self):
         """Walk-forward backtest with proper train/test separation and bootstrap CI."""
         self._validate_keys()
@@ -3371,14 +3588,16 @@ class MedallionBot:
         df=self.client.klines_paginated(SYMBOL,"1h",total=3000,per_page=1500)
         if len(df)<200:log.error("Not enough data for backtest");return
         log.info(f"Fetched {len(df)} bars spanning ~{len(df)//24} days")
-        closes=df["close"].values;highs=df["high"].values;lows=df["low"].values
+        log.info("Fetching 4h history for multi-timeframe signals...")
+        df_4h=self.client.klines_paginated(SYMBOL,"4h",total=750,per_page=1500)
+        log.info(f"Fetched {len(df_4h)} 4h bars")
         # ═══ PROPER TRAIN/TEST SPLIT ═══
         # First 60% for signal calibration (training), last 40% for out-of-sample test
-        n=len(closes);train_n=int(n*0.60);test_start=train_n
+        n=len(df);train_n=int(n*0.60);test_start=train_n
         log.info(f"Total bars: {n} | Train: 0-{train_n} | Test: {test_start}-{n}")
-        log.info(f"Train period signals are computed on training window only")
-        # Run trades only on test portion (out-of-sample)
-        trades=self._simulate_trades(closes,highs,lows,start_equity=300.0,train_end=test_start,step=10)
+        log.info(f"Full-pipeline backtest: Confluence scoring, risk gates, Kelly sizing, multi-TP exits")
+        # Run full-pipeline simulation on test portion (out-of-sample)
+        trades=self._simulate_trades_full(df,df_4h,start_equity=300.0,train_end=test_start)
         if not trades:log.info("No trades generated in backtest");return
         total=len(trades);wins=[t for t in trades if t["pnl"]>0];losses=[t for t in trades if t["pnl"]<=0]
         wr=len(wins)/total;avg_w=np.mean([t["pnl"]for t in wins])if wins else 0
