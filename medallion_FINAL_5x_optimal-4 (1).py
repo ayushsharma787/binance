@@ -3408,6 +3408,9 @@ class MedallionBot:
         """Full-pipeline backtest: replays historical data through actual Confluence scoring,
         risk gate subset, Kelly sizing, and proper multi-TP/trailing-stop exits.
         No live API calls — microstructure data gets conservative defaults."""
+        # Save/restore HMM cache so backtest doesn't pollute live state
+        saved_hmm=Sig._hmm_params
+        Sig._hmm_params=None  # cold start for backtest
         equity=start_equity;peak=start_equity;trades=[]
         consec_losses=0;trades_today=0;daily_pnl=0;last_day=""
         fee_rate=0.0004;min_lookback=200;min_hold_bars=3;last_exit_bar=0
@@ -3578,6 +3581,7 @@ class MedallionBot:
             trades.append({"dir":direction,"strat":strategy,"entry":entry,"pnl":pnl,
                 "pnl_usd":trade_pnl_usd,"exit":exit_reason,"equity":equity,
                 "score":score,"hurst":hurst,"dd":dd,"bar":bar_idx})
+        Sig._hmm_params=saved_hmm  # restore live HMM state
         return trades
 
     def backtest(self):
